@@ -1,0 +1,56 @@
+# ============================================================
+# EvicPress Machine B — Tunable Configuration
+# ============================================================
+# All performance-sensitive knobs are here.
+# Edit this file and restart to apply. Alpha can also be
+# changed live from the dashboard without restarting.
+# ============================================================
+
+evicpress:
+  # Alpha: Quality-vs-latency trade-off in the utility function.
+  #   Util = (alpha * quality_score - ttft) * frequency
+  #   High alpha  => prioritize generation quality (keep high-quality blocks in RAM)
+  #   Low  alpha  => prioritize low TTFT (keep frequently-accessed blocks in RAM)
+  alpha: 1.0
+
+# ---- Tier 2: Machine B RAM ----
+tier2:
+  # How much RAM to dedicate to the KV cache.
+  capacity_bytes: 4294967296   # 4 GB  (change to 8589934592 for 8 GB)
+
+  # RAM read bandwidth (used to estimate TTFT from this tier).
+  bandwidth_bytes_per_sec: 53687091200  # 50 GB/s
+
+# ---- Tier 3: Machine B Disk (NVMe SSD) ----
+tier3:
+  capacity_bytes: 107374182400  # 100 GB
+
+  # NVMe sequential read bandwidth.
+  bandwidth_bytes_per_sec: 3758096384  # 3.5 GB/s
+
+  # Where to store block files on disk.
+  # Use an absolute path to an NVMe-backed directory in production.
+  data_dir: "./data/tier3"
+
+# ---- Prefetching ----
+prefetch:
+  enabled: true
+  # Max blocks waiting in the prefetch queue at once.
+  max_queue_size: 64
+
+# ---- gRPC Server (Machine A connects here) ----
+server:
+  host: "0.0.0.0"
+  port: 50051
+  # Max message size in bytes (must fit largest KV block).
+  max_message_bytes: 536870912  # 512 MB
+
+# ---- Web Dashboard ----
+dashboard:
+  host: "0.0.0.0"
+  port: 8080
+
+# ---- Logging / Debug ----
+logging:
+  # How many recent operations to keep in the in-memory ring buffer.
+  max_recent_ops: 300

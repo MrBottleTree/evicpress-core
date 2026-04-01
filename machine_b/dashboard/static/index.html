@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EvicPress — Machine B Dashboard</title>
+  <style>
+    /* ── Reset + Base ─────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:       #0d0f18;
+      --surface:  #141725;
+      --surface2: #1b1f32;
+      --border:   #252b45;
+      --text:     #cdd6f4;
+      --muted:    #45475a;
+      --accent:   #89b4fa;    /* blue */
+      --green:    #a6e3a1;
+      --amber:    #f9e2af;
+      --red:      #f38ba8;
+      --purple:   #cba6f7;
+      --cyan:     #89dceb;
+      --font:     'Menlo', 'Monaco', 'Cascadia Code', monospace;
+    }
+    html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 12px; }
+
+    /* ── Layout ─────────────────────────────────────── */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 20px;
+      display: flex; align-items: center; justify-content: space-between;
+      position: sticky; top: 0; z-index: 10;
+    }
+    .logo { display: flex; align-items: center; gap: 10px; }
+    .logo-hex { font-size: 22px; color: var(--accent); }
+    .logo-title { font-size: 15px; font-weight: bold; color: var(--accent); }
+    .logo-sub { font-size: 10px; color: var(--muted); }
+    .header-right { display: flex; align-items: center; gap: 16px; }
+    .status-pill {
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 10px; border-radius: 20px;
+      border: 1px solid var(--border); background: var(--surface2);
+      font-size: 11px;
+    }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+    .dot.dead { background: var(--red); }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+    .dot.live { animation: pulse 2s infinite; }
+
+    main { padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; }
+
+    /* ── Cards ──────────────────────────────────────── */
+    .cards { display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; }
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 8px; padding: 14px 16px;
+    }
+    .card-label { font-size: 10px; text-transform: uppercase; letter-spacing:.08em; color: var(--muted); margin-bottom:8px; }
+    .card-value { font-size: 22px; font-weight: bold; color: var(--text); }
+    .card-sub   { font-size: 10px; color: var(--muted); margin-top: 4px; }
+    .bar { height: 5px; background: var(--border); border-radius: 3px; margin-top: 8px; }
+    .bar-fill { height: 100%; border-radius: 3px; transition: width .4s ease; min-width: 3px; }
+    .fill-blue   { background: var(--accent); }
+    .fill-amber  { background: var(--amber); }
+    .fill-green  { background: var(--green); }
+    .fill-purple { background: var(--purple); }
+
+    /* ── Two-column middle row ───────────────────────── */
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .panel {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 8px; padding: 14px 16px;
+    }
+    .panel-title {
+      font-size: 10px; text-transform: uppercase; letter-spacing:.08em;
+      color: var(--purple); margin-bottom: 12px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+
+    /* ── Recent ops ──────────────────────────────────── */
+    .ops-scroll { max-height: 230px; overflow-y: auto; }
+    .op-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 4px 0; border-bottom: 1px solid var(--surface2);
+    }
+    .badge {
+      padding: 2px 7px; border-radius: 4px; font-size: 9px;
+      font-weight: bold; min-width: 68px; text-align: center; flex-shrink: 0;
+    }
+    .b-STORE    { background:#1e3a5f; color:#89b4fa; }
+    .b-RETRIEVE { background:#1a3d2e; color:#a6e3a1; }
+    .b-EVICT    { background:#3d1a1a; color:#f38ba8; }
+    .b-MISS     { background:#3d2b1a; color:#f9e2af; }
+    .b-PROMOTE  { background:#2d1a3d; color:#cba6f7; }
+    .b-PREFETCH { background:#1a3d3d; color:#89dceb; }
+    .b-DELETE   { background:#2e1a1a; color:#eba0ac; }
+    .op-id   { color: var(--muted); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .op-det  { color: #313244; font-size:10px; flex-shrink:0; max-width: 130px; overflow:hidden; text-overflow:ellipsis; }
+    .op-age  { color: #1e2030; font-size:10px; flex-shrink:0; min-width:40px; text-align:right; }
+
+    /* ── Config + Tuning ─────────────────────────────── */
+    .cfg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom:12px; }
+    .cfg-item { background: var(--surface2); border-radius:4px; padding: 8px 10px; }
+    .cfg-key  { font-size: 9px; text-transform:uppercase; color:var(--muted); }
+    .cfg-val  { font-size: 14px; color: var(--accent); font-weight: bold; }
+
+    .tuning-section { border-top: 1px solid var(--border); padding-top: 12px; }
+    .tuning-label { font-size: 10px; color: var(--muted); margin-bottom: 6px; }
+    .alpha-row { display: flex; align-items: center; gap: 10px; }
+    input[type=range] { flex:1; accent-color: var(--purple); cursor:pointer; }
+    .alpha-num { font-size:16px; color:var(--purple); font-weight:bold; min-width:32px; }
+
+    /* ── Block browser ───────────────────────────────── */
+    .block-panel {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 8px; padding: 14px 16px;
+    }
+    .search-bar {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 4px; color: var(--text); font-family: var(--font);
+      padding: 6px 10px; width: 100%; font-size: 12px; margin-bottom: 10px;
+    }
+    .search-bar::placeholder { color: var(--muted); }
+    .search-bar:focus { outline: 1px solid var(--accent); }
+    .tbl-wrap { max-height: 260px; overflow-y: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    thead th {
+      text-align: left; color: var(--muted); font-size: 10px; text-transform: uppercase;
+      padding: 5px 8px; border-bottom: 1px solid var(--border); position:sticky; top:0;
+      background: var(--surface);
+    }
+    tbody tr:hover td { background: var(--surface2); }
+    td { padding: 4px 8px; color: #6c7086; border-bottom: 1px solid #1b1f32; }
+    td.t2 { color: var(--accent); }
+    td.t3 { color: var(--amber); }
+    td.mono { font-family: var(--font); color: #7f849c; font-size:11px; }
+    .empty-state { color: var(--muted); text-align: center; padding: 24px; font-size: 11px; }
+
+    /* ── Scrollbar ───────────────────────────────────── */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: var(--surface); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <span class="logo-hex">⬡</span>
+    <div>
+      <div class="logo-title">EvicPress</div>
+      <div class="logo-sub">Machine B — KV Cache Storage Node</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <span id="lastUpdate" style="color:var(--muted);font-size:10px">connecting…</span>
+    <div class="status-pill">
+      <div class="dot live" id="dot"></div>
+      <span id="statusTxt" style="color:var(--green)">Live</span>
+    </div>
+  </div>
+</header>
+
+<main>
+
+  <!-- ── Stat cards ─────────────────────────── -->
+  <div class="cards">
+    <div class="card">
+      <div class="card-label">Tier 2 · RAM</div>
+      <div class="card-value" id="t2blocks">—</div>
+      <div class="card-sub"  id="t2bytes">— / — GB</div>
+      <div class="bar"><div class="bar-fill fill-blue" id="t2bar" style="width:0%"></div></div>
+    </div>
+    <div class="card">
+      <div class="card-label">Tier 3 · Disk</div>
+      <div class="card-value" id="t3blocks">—</div>
+      <div class="card-sub"  id="t3bytes">— / — GB</div>
+      <div class="bar"><div class="bar-fill fill-amber" id="t3bar" style="width:0%"></div></div>
+    </div>
+    <div class="card">
+      <div class="card-label">Hit Rate</div>
+      <div class="card-value" id="hitRate">—%</div>
+      <div class="card-sub"  id="hitDetail">T2: — · T3: — · Miss: —</div>
+      <div class="bar"><div class="bar-fill fill-green" id="hitBar" style="width:0%"></div></div>
+    </div>
+    <div class="card">
+      <div class="card-label">Operations</div>
+      <div class="card-value" id="totalOps">—</div>
+      <div class="card-sub"  id="evictions">Evictions: —</div>
+      <div class="bar"><div class="bar-fill fill-purple" id="prefetchBar" style="width:0%"></div></div>
+    </div>
+  </div>
+
+  <!-- ── Middle row ─────────────────────────── -->
+  <div class="row2">
+
+    <!-- Recent Operations -->
+    <div class="panel">
+      <div class="panel-title">
+        <span>Recent Operations</span>
+        <span id="opCount" style="color:var(--muted);font-weight:normal">0</span>
+      </div>
+      <div class="ops-scroll" id="opsList">
+        <div class="empty-state">Waiting for operations…</div>
+      </div>
+    </div>
+
+    <!-- Config + Alpha Tuning -->
+    <div class="panel">
+      <div class="panel-title">Configuration</div>
+      <div class="cfg-grid" id="cfgGrid">
+        <div class="cfg-item"><div class="cfg-key">Alpha</div><div class="cfg-val" id="cfgAlpha">—</div></div>
+        <div class="cfg-item"><div class="cfg-key">T2 BW</div><div class="cfg-val" id="cfgT2bw">—</div></div>
+        <div class="cfg-item"><div class="cfg-key">T2 Cap</div><div class="cfg-val" id="cfgT2cap">—</div></div>
+        <div class="cfg-item"><div class="cfg-key">T3 BW</div><div class="cfg-val" id="cfgT3bw">—</div></div>
+        <div class="cfg-item"><div class="cfg-key">T3 Cap</div><div class="cfg-val" id="cfgT3cap">—</div></div>
+        <div class="cfg-item"><div class="cfg-key">Prefetch</div><div class="cfg-val" id="cfgPrefetch">—</div></div>
+      </div>
+
+      <div class="tuning-section">
+        <div class="tuning-label">
+          Live-tune Alpha (Quality ↔ Latency trade-off)
+        </div>
+        <div class="alpha-row">
+          <span style="color:var(--muted);font-size:10px">TTFT</span>
+          <input type="range" id="alphaSlider" min="0" max="5" step="0.05" value="1.0">
+          <span style="color:var(--muted);font-size:10px">Quality</span>
+          <span class="alpha-num" id="alphaNum">1.00</span>
+        </div>
+        <div style="color:var(--muted);font-size:10px;margin-top:4px">
+          Changes take effect immediately — no restart needed.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Block browser ──────────────────────── -->
+  <div class="block-panel">
+    <div class="panel-title" style="color:var(--purple);font-size:10px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">
+      Block Browser
+      <span id="blkCount" style="color:var(--muted);font-weight:normal">0 blocks</span>
+    </div>
+    <input type="text" class="search-bar" id="blkSearch" placeholder="Filter by block ID…">
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Block ID</th>
+            <th>Tier</th>
+            <th>Size</th>
+            <th>Accesses</th>
+            <th>Quality</th>
+            <th>Last Access</th>
+            <th>Created</th>
+          </tr>
+        </thead>
+        <tbody id="blkTbody">
+          <tr><td colspan="7" class="empty-state">No blocks stored yet.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</main>
+
+<script>
+// ─── State ───────────────────────────────────────────────
+let allBlocks = [];
+let pendingAlpha = null;
+let alphaDebounce = null;
+let connected = false;
+
+// ─── Helpers ─────────────────────────────────────────────
+function fmtBytes(b) {
+  if (b >= 1e9) return (b/1e9).toFixed(2) + ' GB';
+  if (b >= 1e6) return (b/1e6).toFixed(1) + ' MB';
+  if (b >= 1e3) return (b/1e3).toFixed(1) + ' KB';
+  return b + ' B';
+}
+function fmtPct(f) { return (f*100).toFixed(1) + '%'; }
+function timeAgo(ts) {
+  const d = Date.now()/1000 - ts;
+  if (d < 5)   return 'just now';
+  if (d < 60)  return Math.round(d) + 's ago';
+  if (d < 3600) return Math.round(d/60) + 'm ago';
+  return Math.round(d/3600) + 'h ago';
+}
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ─── State update ─────────────────────────────────────────
+function applyState(state) {
+  const t2 = state.tier2, t3 = state.tier3, s = state.stats, c = state.config;
+
+  // Tier cards
+  set('t2blocks', t2.block_count + ' blocks');
+  set('t2bytes',  fmtBytes(t2.used_bytes) + ' / ' + fmtBytes(t2.capacity_bytes));
+  setBar('t2bar', t2.utilization);
+
+  set('t3blocks', t3.block_count + ' blocks');
+  set('t3bytes',  fmtBytes(t3.used_bytes) + ' / ' + fmtBytes(t3.capacity_bytes));
+  setBar('t3bar', t3.utilization);
+
+  const hr = s.hit_rate;
+  set('hitRate',  fmtPct(hr));
+  set('hitDetail', `T2: ${s.tier2_hits} · T3: ${s.tier3_hits} · Miss: ${s.total_misses}`);
+  setBar('hitBar', hr);
+
+  set('totalOps', s.total_ops.toLocaleString());
+  set('evictions', 'Evictions: ' + s.evictions.toLocaleString());
+  const pq = state.prefetch_queue_size || 0;
+  setBar('prefetchBar', Math.min(pq / 64, 1));
+
+  // Config panel
+  set('cfgAlpha',   c.alpha.toFixed(2));
+  set('cfgT2bw',    c.tier2_bandwidth_gbps.toFixed(0) + ' GB/s');
+  set('cfgT2cap',   c.tier2_capacity_gb.toFixed(1) + ' GB');
+  set('cfgT3bw',    c.tier3_bandwidth_gbps.toFixed(1) + ' GB/s');
+  set('cfgT3cap',   c.tier3_capacity_gb.toFixed(1) + ' GB');
+  set('cfgPrefetch', c.prefetch_enabled ? '✓ ON' : '✗ OFF');
+
+  // Sync slider only if not user-dragging and value drifted
+  const slider = document.getElementById('alphaSlider');
+  if (pendingAlpha === null && Math.abs(parseFloat(slider.value) - c.alpha) > 0.04) {
+    slider.value = c.alpha;
+    set('alphaNum', c.alpha.toFixed(2));
+  }
+
+  // Recent ops
+  const ops = state.recent_ops || [];
+  set('opCount', ops.length);
+  if (ops.length === 0) {
+    document.getElementById('opsList').innerHTML = '<div class="empty-state">Waiting for operations…</div>';
+  } else {
+    document.getElementById('opsList').innerHTML = ops.map(o => `
+      <div class="op-row">
+        <span class="badge b-${esc(o.op)}">${esc(o.op)}</span>
+        <span class="op-id">${esc(o.block_id)}</span>
+        <span class="op-det">${esc(o.detail)}</span>
+        <span class="op-age">${timeAgo(o.time)}</span>
+      </div>
+    `).join('');
+  }
+
+  document.getElementById('lastUpdate').textContent = 'Updated ' + new Date().toLocaleTimeString();
+}
+
+function set(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
+function setBar(id, frac) {
+  const el = document.getElementById(id);
+  if (el) el.style.width = Math.min(Math.max(frac*100, 0), 100).toFixed(1) + '%';
+}
+
+// ─── Block browser ────────────────────────────────────────
+function renderBlocks(filter) {
+  const q = (filter || '').toLowerCase();
+  const filtered = q ? allBlocks.filter(b => b.block_id.toLowerCase().includes(q)) : allBlocks;
+  set('blkCount', filtered.length + ' blocks');
+
+  const tbody = document.getElementById('blkTbody');
+  if (filtered.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No blocks match.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = filtered.slice(0, 200).map(b => `
+    <tr>
+      <td class="mono">${esc(b.block_id.substring(0,36))}…</td>
+      <td class="t${b.tier}">Tier ${b.tier}</td>
+      <td>${fmtBytes(b.size_bytes)}</td>
+      <td>${b.access_count}</td>
+      <td>${(b.quality_score*100).toFixed(0)}%</td>
+      <td>${timeAgo(b.last_access)}</td>
+      <td>${timeAgo(b.created_at)}</td>
+    </tr>
+  `).join('');
+}
+
+// ─── Alpha slider ─────────────────────────────────────────
+document.getElementById('alphaSlider').addEventListener('input', function() {
+  const v = parseFloat(this.value);
+  set('alphaNum', v.toFixed(2));
+  pendingAlpha = v;
+  clearTimeout(alphaDebounce);
+  alphaDebounce = setTimeout(async () => {
+    try {
+      await fetch('/api/config', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({alpha: pendingAlpha})
+      });
+    } finally {
+      pendingAlpha = null;
+    }
+  }, 300);
+});
+
+// ─── Block search ─────────────────────────────────────────
+document.getElementById('blkSearch').addEventListener('input', function() {
+  renderBlocks(this.value);
+});
+
+// ─── Polling ──────────────────────────────────────────────
+async function poll() {
+  try {
+    const [stateRes, blocksRes] = await Promise.all([
+      fetch('/api/state'),
+      fetch('/api/blocks'),
+    ]);
+    if (!stateRes.ok || !blocksRes.ok) throw new Error('bad response');
+
+    const state = await stateRes.json();
+    allBlocks   = await blocksRes.json();
+
+    applyState(state);
+    renderBlocks(document.getElementById('blkSearch').value);
+
+    if (!connected) {
+      connected = true;
+      document.getElementById('dot').className = 'dot live';
+      document.getElementById('dot').style.background = 'var(--green)';
+      document.getElementById('statusTxt').textContent = 'Live';
+      document.getElementById('statusTxt').style.color = 'var(--green)';
+    }
+  } catch(e) {
+    connected = false;
+    document.getElementById('dot').className = 'dot dead';
+    document.getElementById('statusTxt').textContent = 'Disconnected';
+    document.getElementById('statusTxt').style.color = 'var(--red)';
+  }
+}
+
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>
