@@ -9,6 +9,12 @@ from dataclasses import dataclass
 
 
 @dataclass
+class Tier1Config:
+    capacity_bytes: int
+    bandwidth_bytes_per_sec: float
+
+
+@dataclass
 class Tier2Config:
     capacity_bytes: int
     bandwidth_bytes_per_sec: float
@@ -24,6 +30,7 @@ class Tier3Config:
 @dataclass
 class EvicPressConfig:
     alpha: float                    # Mutable at runtime
+    tier1: Tier1Config
     tier2: Tier2Config
     tier3: Tier3Config
     prefetch_enabled: bool
@@ -42,6 +49,10 @@ def load_config(path: str = "config/config.yaml") -> EvicPressConfig:
 
     return EvicPressConfig(
         alpha=float(raw["evicpress"]["alpha"]),
+        tier1=Tier1Config(
+            capacity_bytes=int(raw["tier1"]["capacity_bytes"]),
+            bandwidth_bytes_per_sec=float(raw["tier1"]["bandwidth_bytes_per_sec"]),
+        ),
         tier2=Tier2Config(
             capacity_bytes=int(raw["tier2"]["capacity_bytes"]),
             bandwidth_bytes_per_sec=float(raw["tier2"]["bandwidth_bytes_per_sec"]),

@@ -51,7 +51,7 @@
     main { padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; }
 
     /* ── Cards ──────────────────────────────────────── */
-    .cards { display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; }
+    .cards { display: grid; grid-template-columns: repeat(5,1fr); gap: 12px; }
     .card {
       background: var(--surface); border: 1px solid var(--border);
       border-radius: 8px; padding: 14px 16px;
@@ -61,6 +61,7 @@
     .card-sub   { font-size: 10px; color: var(--muted); margin-top: 4px; }
     .bar { height: 5px; background: var(--border); border-radius: 3px; margin-top: 8px; }
     .bar-fill { height: 100%; border-radius: 3px; transition: width .4s ease; min-width: 3px; }
+    .fill-cyan   { background: var(--cyan); }
     .fill-blue   { background: var(--accent); }
     .fill-amber  { background: var(--amber); }
     .fill-green  { background: var(--green); }
@@ -132,6 +133,7 @@
     }
     tbody tr:hover td { background: var(--surface2); }
     td { padding: 4px 8px; color: #6c7086; border-bottom: 1px solid #1b1f32; }
+    td.t1 { color: var(--cyan); }
     td.t2 { color: var(--accent); }
     td.t3 { color: var(--amber); }
     td.mono { font-family: var(--font); color: #7f849c; font-size:11px; }
@@ -167,7 +169,13 @@
   <!-- ── Stat cards ─────────────────────────── -->
   <div class="cards">
     <div class="card">
-      <div class="card-label">Tier 2 · RAM</div>
+      <div class="card-label">Tier 1 · Machine A RAM</div>
+      <div class="card-value" id="t1blocks">—</div>
+      <div class="card-sub"  id="t1bytes">— / — GB</div>
+      <div class="bar"><div class="bar-fill fill-cyan" id="t1bar" style="width:0%"></div></div>
+    </div>
+    <div class="card">
+      <div class="card-label">Tier 2 · Machine B RAM</div>
       <div class="card-value" id="t2blocks">—</div>
       <div class="card-sub"  id="t2bytes">— / — GB</div>
       <div class="bar"><div class="bar-fill fill-blue" id="t2bar" style="width:0%"></div></div>
@@ -181,7 +189,7 @@
     <div class="card">
       <div class="card-label">Hit Rate</div>
       <div class="card-value" id="hitRate">—%</div>
-      <div class="card-sub"  id="hitDetail">T2: — · T3: — · Miss: —</div>
+      <div class="card-sub"  id="hitDetail">T1: — · T2: — · T3: — · Miss: —</div>
       <div class="bar"><div class="bar-fill fill-green" id="hitBar" style="width:0%"></div></div>
     </div>
     <div class="card">
@@ -211,6 +219,8 @@
       <div class="panel-title">Configuration</div>
       <div class="cfg-grid" id="cfgGrid">
         <div class="cfg-item"><div class="cfg-key">Alpha</div><div class="cfg-val" id="cfgAlpha">—</div></div>
+        <div class="cfg-item"><div class="cfg-key">T1 Cap</div><div class="cfg-val" id="cfgT1cap">—</div></div>
+        <div class="cfg-item"><div class="cfg-key">T1 BW</div><div class="cfg-val" id="cfgT1bw">—</div></div>
         <div class="cfg-item"><div class="cfg-key">T2 BW</div><div class="cfg-val" id="cfgT2bw">—</div></div>
         <div class="cfg-item"><div class="cfg-key">T2 Cap</div><div class="cfg-val" id="cfgT2cap">—</div></div>
         <div class="cfg-item"><div class="cfg-key">T3 BW</div><div class="cfg-val" id="cfgT3bw">—</div></div>
@@ -292,9 +302,14 @@ function esc(s) {
 
 // ─── State update ─────────────────────────────────────────
 function applyState(state) {
-  const t2 = state.tier2, t3 = state.tier3, s = state.stats, c = state.config;
+  const t1 = state.tier1 || {}, t2 = state.tier2, t3 = state.tier3, s = state.stats, c = state.config;
 
-  // Tier cards
+  // Tier 1 card (Machine A RAM — local ledger)
+  set('t1blocks', (t1.block_count || 0) + ' blocks');
+  set('t1bytes',  fmtBytes(t1.used_bytes || 0) + ' / ' + fmtBytes(t1.capacity_bytes || 0));
+  setBar('t1bar', t1.utilization || 0);
+
+  // Tier 2 card
   set('t2blocks', t2.block_count + ' blocks');
   set('t2bytes',  fmtBytes(t2.used_bytes) + ' / ' + fmtBytes(t2.capacity_bytes));
   setBar('t2bar', t2.utilization);
@@ -305,7 +320,8 @@ function applyState(state) {
 
   const hr = s.hit_rate;
   set('hitRate',  fmtPct(hr));
-  set('hitDetail', `T2: ${s.tier2_hits} · T3: ${s.tier3_hits} · Miss: ${s.total_misses}`);
+  const t1promo = s.tier1_promotions || 0;
+  set('hitDetail', `T1 promo: ${t1promo} · T2: ${s.tier2_hits} · T3: ${s.tier3_hits} · Miss: ${s.total_misses}`);
   setBar('hitBar', hr);
 
   set('totalOps', s.total_ops.toLocaleString());
@@ -315,6 +331,8 @@ function applyState(state) {
 
   // Config panel
   set('cfgAlpha',   c.alpha.toFixed(2));
+  set('cfgT1cap',   (c.tier1_capacity_gb || 0).toFixed(1) + ' GB');
+  set('cfgT1bw',    (c.tier1_bandwidth_gbps || 0).toFixed(0) + ' GB/s');
   set('cfgT2bw',    c.tier2_bandwidth_gbps.toFixed(0) + ' GB/s');
   set('cfgT2cap',   c.tier2_capacity_gb.toFixed(1) + ' GB');
   set('cfgT3bw',    c.tier3_bandwidth_gbps.toFixed(1) + ' GB/s');

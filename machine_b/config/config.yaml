@@ -13,6 +13,14 @@ evicpress:
   #   Low  alpha  => prioritize low TTFT (keep frequently-accessed blocks in RAM)
   alpha: 1.0
 
+# ---- Tier 1: Machine A RAM (controlled by Machine B) ----
+# Machine B promotes high-utility blocks here so Machine A can serve them
+# from local RAM without a network round-trip. Machine B tracks this tier
+# locally — it never queries Machine A for stats.
+tier1:
+  capacity_bytes: 8589934592          # 8 GB estimate for Machine A KV RAM budget
+  bandwidth_bytes_per_sec: 53687091200  # 50 GB/s (Machine A RAM bandwidth)
+
 # ---- Tier 2: Machine B RAM ----
 tier2:
   # How much RAM to dedicate to the KV cache.

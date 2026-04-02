@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "evicpress": {
+      "command": "python",
+      "args": [
+        "C:\\Users\\vishr\\Documents\\projects\\evicpress-core\\mcp\\server.py"
+      ]
+    }
+  }
+}

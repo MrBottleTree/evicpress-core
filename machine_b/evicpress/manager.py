@@ -2,11 +2,19 @@
 EvicPressManager — the heart of Machine B.
 
 Responsibilities:
-  - Decide where to place a new block (Tier 2 or Tier 3)
+  - Decide where to place a new block (Tier 1 / Tier 2 / Tier 3)
   - Evict blocks using the Greedy Knapsack algorithm from the paper
+  - Maintain a local ledger of blocks promoted to Machine A RAM (Tier 1)
+    without ever querying Machine A
   - Promote Tier 3 blocks to Tier 2 on retrieval (opportunistic)
   - Accept prefetch hints and process them in the background
   - Expose real-time state for the dashboard
+
+Tier 1 design:
+  Machine B controls Tier 1 (Machine A RAM) by returning tier=1 in StoreResponse.
+  Machine A's GRPCBackend writes the block to its LocalCPUBackend when it sees tier=1.
+  Machine B maintains a local Tier1Ledger as an estimate — it does NOT ping Machine A.
+  The ledger may become stale if Machine A evicts entries; it self-corrects on next access.
 """
 
 import asyncio
@@ -20,6 +28,102 @@ from .block import Block
 from .config import EvicPressConfig
 from .tier_disk import DiskTier
 from .tier_ram import RamTier
+
+
+# ──────────────────────────────────────────────────────────────── #
+#  Tier 1 ledger (local accounting of Machine A RAM)               #
+# ──────────────────────────────────────────────────────────────── #
+
+class Tier1Ledger:
+    """
+    Local-only accounting of which blocks Machine B has promoted to Machine A RAM.
+    Never queries Machine A. May be slightly stale if Machine A evicts entries.
+
+    Admission policy: Greedy Knapsack by quality_score.
+    When full, evict the lowest-quality block if the new block is better.
+    """
+
+    def __init__(self, capacity_bytes: int, bandwidth_bytes_per_sec: float) -> None:
+        self._capacity = capacity_bytes
+        self._bandwidth = bandwidth_bytes_per_sec
+        # block_id → (size_bytes, quality_score)
+        self._entries: dict[str, tuple[int, float]] = {}
+        self._used_bytes: int = 0
+        self._lock = threading.RLock()
+
+    def try_admit(self, block_id: str, size_bytes: int, quality_score: float) -> bool:
+        """
+        Try to admit a block into Tier 1. May evict lower-quality blocks to make room.
+        Returns True if the block was admitted (Machine A should cache it).
+        """
+        with self._lock:
+            if block_id in self._entries:
+                return True  # already tracked
+
+            if size_bytes > self._capacity:
+                return False  # block alone exceeds tier capacity
+
+            # Free space by evicting lowest-quality blocks if needed
+            if self._used_bytes + size_bytes > self._capacity:
+                self._evict_to_make_room(size_bytes, quality_score)
+
+            if self._used_bytes + size_bytes > self._capacity:
+                return False  # not worth promoting after eviction attempt
+
+            self._entries[block_id] = (size_bytes, quality_score)
+            self._used_bytes += size_bytes
+            return True
+
+    def _evict_to_make_room(self, needed_bytes: int, new_quality: float) -> None:
+        """Evict lowest-quality entries until enough space is free, but only if
+        the evicted entry's quality is strictly lower than the new block's quality."""
+        candidates = sorted(self._entries.items(), key=lambda x: x[1][1])  # sort by quality_score asc
+        for bid, (sz, qs) in candidates:
+            if self._used_bytes + needed_bytes <= self._capacity:
+                break
+            if qs >= new_quality:
+                break  # don't evict equally- or higher-quality blocks
+            del self._entries[bid]
+            self._used_bytes -= sz
+
+    def remove(self, block_id: str) -> int:
+        """Remove block from ledger. Returns size_bytes removed (0 if not present)."""
+        with self._lock:
+            entry = self._entries.pop(block_id, None)
+            if entry:
+                self._used_bytes -= entry[0]
+                return entry[0]
+            return 0
+
+    def contains(self, block_id: str) -> bool:
+        with self._lock:
+            return block_id in self._entries
+
+    def has_space(self, size_bytes: int) -> bool:
+        with self._lock:
+            return self._used_bytes + size_bytes <= self._capacity
+
+    @property
+    def used_bytes(self) -> int:
+        return self._used_bytes
+
+    @property
+    def capacity_bytes(self) -> int:
+        return self._capacity
+
+    @property
+    def block_count(self) -> int:
+        return len(self._entries)
+
+    @property
+    def utilization(self) -> float:
+        if self._capacity == 0:
+            return 0.0
+        return self._used_bytes / self._capacity
+
+    @property
+    def bandwidth_bytes_per_sec(self) -> float:
+        return self._bandwidth
 
 
 # ──────────────────────────────────────────────────────────────── #
@@ -37,19 +141,23 @@ class Operation:
 
 class _Stats:
     def __init__(self) -> None:
-        self.total_hits:   int = 0
-        self.total_misses: int = 0
-        self.tier2_hits:   int = 0
-        self.tier3_hits:   int = 0
-        self.evictions:    int = 0
-        self.total_ops:    int = 0
+        self.total_hits:      int = 0
+        self.total_misses:    int = 0
+        self.tier1_hits:      int = 0  # served from Machine A RAM (local estimate)
+        self.tier2_hits:      int = 0
+        self.tier3_hits:      int = 0
+        self.evictions:       int = 0
+        self.tier1_promotions: int = 0  # times Machine B signalled tier=1 to Machine A
+        self.total_ops:       int = 0
         self._lock = threading.Lock()
 
     def hit(self, tier: int) -> None:
         with self._lock:
             self.total_hits += 1
             self.total_ops  += 1
-            if tier == 2:
+            if tier == 1:
+                self.tier1_hits += 1
+            elif tier == 2:
                 self.tier2_hits += 1
             else:
                 self.tier3_hits += 1
@@ -63,6 +171,10 @@ class _Stats:
         with self._lock:
             self.evictions += 1
 
+    def promote_tier1(self) -> None:
+        with self._lock:
+            self.tier1_promotions += 1
+
 
 # ──────────────────────────────────────────────────────────────── #
 #  Manager                                                          #
@@ -71,6 +183,10 @@ class _Stats:
 class EvicPressManager:
     def __init__(self, config: EvicPressConfig) -> None:
         self.config = config
+        self.tier1 = Tier1Ledger(
+            config.tier1.capacity_bytes,
+            config.tier1.bandwidth_bytes_per_sec,
+        )
         self.tier2 = RamTier(config.tier2.capacity_bytes)
         self.tier3 = DiskTier(config.tier3.capacity_bytes, config.tier3.data_dir)
         self.stats = _Stats()
@@ -86,7 +202,11 @@ class EvicPressManager:
     # ────────────────────────────────────────── #
 
     def lookup(self, block_id: str) -> Tuple[bool, int]:
-        """Returns (hit, tier). tier=0 on miss."""
+        """Returns (hit, tier). tier=0 on miss, 1=Machine A RAM, 2=Machine B RAM, 3=disk."""
+        # Tier 1 check first: if ledger says Machine A has it, return tier=1
+        # so GRPCBackend skips any prefetch and serves directly from Machine A RAM.
+        if self.tier1.contains(block_id):
+            return True, 1
         if self.tier2.contains(block_id):
             return True, 2
         if self.tier3.contains(block_id):
@@ -95,47 +215,56 @@ class EvicPressManager:
 
     def store(self, block_id: str, data: bytes, quality_score: float = 1.0) -> Tuple[bool, int]:
         """
-        Store a block. Machine B decides which tier.
+        Store a block. Machine B decides all tier placement.
         Returns (success, tier_placed).
+
+        tier_placed == 1 means Machine B wants Machine A to also cache this block
+        in its local RAM (Tier 1). The block is additionally stored in Tier 2 or 3
+        on Machine B as the canonical copy.
         """
         block = Block(block_id=block_id, data=data, tier=2, quality_score=quality_score)
 
         with self._lock:
             # Preserve access history if block already exists
             existing_t2 = self.tier2.remove(block_id)
-            existing_t3_removed = False
             if existing_t2:
                 block.access_count = existing_t2.access_count
                 block.created_at   = existing_t2.created_at
             elif self.tier3.contains(block_id):
                 self.tier3.remove(block_id)
-                existing_t3_removed = True
 
-            # Try Tier 2 first
+            # Place block in Machine B (Tier 2 preferred, Tier 3 fallback)
             if self.tier2.has_space(block.size_bytes):
                 self.tier2.put(block)
+                canonical_tier = 2
                 self._log("STORE", block_id, f"tier2 size={_fmt(block.size_bytes)}")
-                return True, 2
-
-            # Tier 2 full: run Greedy Knapsack to free space
-            if self._evict_tier2_to_make_room(block.size_bytes):
+            elif self._evict_tier2_to_make_room(block.size_bytes):
                 self.tier2.put(block)
+                canonical_tier = 2
                 self._log("STORE", block_id, f"tier2 (after eviction) size={_fmt(block.size_bytes)}")
-                return True, 2
+            else:
+                block.tier = 3
+                if not self.tier3.has_space(block.size_bytes):
+                    self._evict_tier3_to_make_room(block.size_bytes)
+                self.tier3.put(block)
+                canonical_tier = 3
+                self._log("STORE", block_id, f"tier3 size={_fmt(block.size_bytes)}")
 
-            # Fall back to Tier 3
-            block.tier = 3
-            if not self.tier3.has_space(block.size_bytes):
-                self._evict_tier3_to_make_room(block.size_bytes)
+            # Decide whether to also promote to Tier 1 (Machine A RAM).
+            # Try to admit: Tier1Ledger uses Greedy Knapsack by quality_score.
+            promoted = self.tier1.try_admit(block_id, block.size_bytes, quality_score)
+            if promoted:
+                self.stats.promote_tier1()
+                self._log("PROMOTE", block_id, f"→tier1 quality={quality_score:.2f}")
+                return True, 1  # Signal Machine A to cache in Tier 1
 
-            self.tier3.put(block)
-            self._log("STORE", block_id, f"tier3 size={_fmt(block.size_bytes)}")
-            return True, 3
+            return True, canonical_tier
 
     def retrieve(self, block_id: str) -> Optional[Tuple[bytes, int]]:
         """
         Fetch a block's data. Returns (data, source_tier) or None on miss.
-        Opportunistically promotes from Tier 3 → Tier 2 if RAM has space.
+        Tier 1 hits are served by Machine A without reaching here, so we only
+        see Tier 2 / Tier 3 requests. Opportunistically promotes Tier 3 → Tier 2.
         """
         with self._lock:
             # Tier 2 check
@@ -158,13 +287,14 @@ class EvicPressManager:
                     self._log("PROMOTE", block_id, "tier3→tier2")
                 return block.data, 3
 
-            # Miss
+            # Miss — tier1 ledger may be stale; Machine A already missed too
             self.stats.miss()
             self._log("MISS", block_id, "not found")
             return None
 
     def delete(self, block_id: str) -> bool:
         with self._lock:
+            self.tier1.remove(block_id)
             removed = self.tier2.remove(block_id) is not None
             removed |= self.tier3.remove(block_id)
             if removed:
@@ -211,6 +341,8 @@ class EvicPressManager:
         """
         Move lowest-utility Tier 2 blocks to Tier 3 until `needed_bytes` is free.
         Returns True if enough space was reclaimed.
+        When a block is demoted from Tier 2, it is also removed from the Tier 1 ledger
+        (Machine A's copy becomes lower priority; Machine B's canonical copy is now slower).
         """
         total = self.stats.total_hits + self.stats.total_misses
         alpha = self.config.alpha
@@ -232,6 +364,9 @@ class EvicPressManager:
             freed += removed.size_bytes
             self.stats.evict()
 
+            # Remove from Tier 1 ledger: canonical copy is going to slower Tier 3
+            self.tier1.remove(removed.block_id)
+
             # Push to Tier 3 (make room there first if needed)
             if not self.tier3.has_space(removed.size_bytes):
                 self._evict_tier3_to_make_room(removed.size_bytes)
@@ -244,7 +379,7 @@ class EvicPressManager:
     def _evict_tier3_to_make_room(self, needed_bytes: int) -> None:
         """
         Delete lowest-utility Tier 3 blocks until `needed_bytes` is free.
-        (Data is permanently lost — these are the lowest-value blocks.)
+        Also removes evicted blocks from the Tier 1 ledger.
         """
         total = self.stats.total_hits + self.stats.total_misses
         alpha = self.config.alpha
@@ -265,6 +400,7 @@ class EvicPressManager:
             if self.tier3.remove(meta["block_id"]):
                 freed += meta["size_bytes"]
                 self.stats.evict()
+                self.tier1.remove(meta["block_id"])  # stale ledger entry
                 self._log("EVICT", meta["block_id"], "tier3→deleted")
 
     # ────────────────────────────────────────── #
@@ -287,6 +423,12 @@ class EvicPressManager:
         ]
 
         return {
+            "tier1": {
+                "used_bytes":    self.tier1.used_bytes,
+                "capacity_bytes": self.tier1.capacity_bytes,
+                "block_count":   self.tier1.block_count,
+                "utilization":   self.tier1.utilization,
+            },
             "tier2": {
                 "used_bytes":    self.tier2.used_bytes,
                 "capacity_bytes": self.tier2.capacity_bytes,
@@ -300,17 +442,21 @@ class EvicPressManager:
                 "utilization":   self.tier3.utilization,
             },
             "stats": {
-                "total_hits":   self.stats.total_hits,
-                "total_misses": self.stats.total_misses,
-                "tier2_hits":   self.stats.tier2_hits,
-                "tier3_hits":   self.stats.tier3_hits,
-                "evictions":    self.stats.evictions,
-                "hit_rate":     hit_rate,
-                "total_ops":    self.stats.total_ops,
+                "total_hits":       self.stats.total_hits,
+                "total_misses":     self.stats.total_misses,
+                "tier1_hits":       self.stats.tier1_hits,
+                "tier2_hits":       self.stats.tier2_hits,
+                "tier3_hits":       self.stats.tier3_hits,
+                "tier1_promotions": self.stats.tier1_promotions,
+                "evictions":        self.stats.evictions,
+                "hit_rate":         hit_rate,
+                "total_ops":        self.stats.total_ops,
             },
             "recent_ops": ops,
             "config": {
                 "alpha":               self.config.alpha,
+                "tier1_capacity_gb":   self.config.tier1.capacity_bytes / 1e9,
+                "tier1_bandwidth_gbps": self.config.tier1.bandwidth_bytes_per_sec / 1e9,
                 "tier2_capacity_gb":   self.config.tier2.capacity_bytes / 1e9,
                 "tier3_capacity_gb":   self.config.tier3.capacity_bytes / 1e9,
                 "tier2_bandwidth_gbps": self.config.tier2.bandwidth_bytes_per_sec / 1e9,

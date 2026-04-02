@@ -1,0 +1,18 @@
+# EvicPress MCP SSH Configuration
+# Edit these once. IPs are set dynamically in the chat session.
+
+ssh:
+  machine_a:
+    username: "ubuntu"          # SSH username for Machine A (vLLM / LMCache)
+    key_path: "~/.ssh/dstn-project-access-file.pem"
+    port: 22
+
+  machine_b:
+    username: "ubuntu"          # SSH username for Machine B (EvicPress storage node)
+    key_path: "~/.ssh/dstn-project-access-file.pem"
+    port: 22
+
+# Timeouts in seconds
+timeouts:
+  connect: 10
+  command: 60
