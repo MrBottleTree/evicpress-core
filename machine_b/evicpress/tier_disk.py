@@ -9,6 +9,7 @@ Only metadata is kept in memory; data is read from disk on demand.
 This means Tier 3 can hold far more blocks than Tier 2 without bloating RAM.
 """
 
+import hashlib
 import json
 import os
 import threading
@@ -39,33 +40,48 @@ class DiskTier:
 
     def _load_existing(self) -> None:
         """Reconstruct the in-memory index from metadata files on disk."""
+        valid_hashes: set[str] = set()
         for fname in os.listdir(self._meta_dir):
             if not fname.endswith(".json"):
                 continue
-            block_id = fname[:-5]
+            file_hash = fname[:-5]  # filename IS the md5 hash, not the block_id
             meta_path = os.path.join(self._meta_dir, fname)
-            blob_path = self._blob_path(block_id)
+            blob_path = os.path.join(self._blob_dir, file_hash + ".bin")
             try:
                 with open(meta_path) as f:
                     meta = json.load(f)
                 if os.path.exists(blob_path):
-                    self._index[block_id] = meta
+                    self._index[meta["block_id"]] = meta  # key by real block_id
                     self._used_bytes += meta["size_bytes"]
+                    valid_hashes.add(file_hash)
                 else:
-                    # Orphan meta file — remove it
                     os.remove(meta_path)
             except Exception:
                 pass  # Corrupted meta; skip silently
+        # Remove orphaned .bin files (blob without matching meta)
+        for fname in os.listdir(self._blob_dir):
+            if not fname.endswith(".bin"):
+                continue
+            if fname[:-4] not in valid_hashes:
+                try:
+                    os.remove(os.path.join(self._blob_dir, fname))
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------ #
     #  Path helpers                                                        #
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _safe_name(block_id: str) -> str:
+        """Hash block_id to a safe filename — block_ids can contain '/' from model names."""
+        return hashlib.md5(block_id.encode()).hexdigest()
+
     def _meta_path(self, block_id: str) -> str:
-        return os.path.join(self._meta_dir, f"{block_id}.json")
+        return os.path.join(self._meta_dir, f"{self._safe_name(block_id)}.json")
 
     def _blob_path(self, block_id: str) -> str:
-        return os.path.join(self._blob_dir, f"{block_id}.bin")
+        return os.path.join(self._blob_dir, f"{self._safe_name(block_id)}.bin")
 
     # ------------------------------------------------------------------ #
     #  Public API                                                          #

@@ -20,6 +20,7 @@ Tier 1 design:
 import asyncio
 import threading
 import time
+import zlib
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
@@ -75,14 +76,18 @@ class Tier1Ledger:
             return True
 
     def _evict_to_make_room(self, needed_bytes: int, new_quality: float) -> None:
-        """Evict lowest-quality entries until enough space is free, but only if
-        the evicted entry's quality is strictly lower than the new block's quality."""
-        candidates = sorted(self._entries.items(), key=lambda x: x[1][1])  # sort by quality_score asc
-        for bid, (sz, qs) in candidates:
+        """Evict lowest-quality entries until enough space is free.
+        Among equal-quality blocks, evicts oldest-inserted first (LRU tiebreak).
+        Never evicts a block with strictly higher quality than the incoming one."""
+        candidates = sorted(
+            enumerate(self._entries.items()),
+            key=lambda x: (x[1][1][1], x[0])  # (quality_score asc, insertion_idx asc)
+        )
+        for _, (bid, (sz, qs)) in candidates:
             if self._used_bytes + needed_bytes <= self._capacity:
                 break
-            if qs >= new_quality:
-                break  # don't evict equally- or higher-quality blocks
+            if qs > new_quality:
+                break  # never displace a strictly better block
             del self._entries[bid]
             self._used_bytes -= sz
 
@@ -180,6 +185,16 @@ class _Stats:
 #  Manager                                                          #
 # ──────────────────────────────────────────────────────────────── #
 
+def _compute_quality(data: bytes) -> float:
+    """Estimate block uniqueness via zlib compression ratio. High ratio = hard to compress = high quality."""
+    if not data:
+        return 1.0
+    sample = data[:65536]
+    compressed_len = len(zlib.compress(sample, level=1))
+    ratio = compressed_len / len(sample)
+    return round(max(0.1, min(1.0, ratio)), 3)
+
+
 class EvicPressManager:
     def __init__(self, config: EvicPressConfig) -> None:
         self.config = config
@@ -222,31 +237,40 @@ class EvicPressManager:
         in its local RAM (Tier 1). The block is additionally stored in Tier 2 or 3
         on Machine B as the canonical copy.
         """
+        # Compute quality dynamically if caller passed the static default
+        if quality_score >= 1.0:
+            quality_score = _compute_quality(data)
+
         block = Block(block_id=block_id, data=data, tier=2, quality_score=quality_score)
 
         with self._lock:
-            # Preserve access history if block already exists
+            # Preserve access history if block already exists in T2
             existing_t2 = self.tier2.remove(block_id)
             if existing_t2:
                 block.access_count = existing_t2.access_count
                 block.created_at   = existing_t2.created_at
-            elif self.tier3.contains(block_id):
-                self.tier3.remove(block_id)
+            # If block is already in T3 and T2 has no room for it, leave it there —
+            # don't pull it out of T3 only to put it back. Only remove from T3 if
+            # we're actually going to place it in T2 (checked below).
 
             # Place block in Machine B (Tier 2 preferred, Tier 3 fallback)
             if self.tier2.has_space(block.size_bytes):
+                self.tier3.remove(block_id)  # upgrading from T3 → T2 if present
                 self.tier2.put(block)
                 canonical_tier = 2
                 self._log("STORE", block_id, f"tier2 size={_fmt(block.size_bytes)}")
             elif self._evict_tier2_to_make_room(block.size_bytes):
+                self.tier3.remove(block_id)  # upgrading from T3 → T2 if present
                 self.tier2.put(block)
                 canonical_tier = 2
                 self._log("STORE", block_id, f"tier2 (after eviction) size={_fmt(block.size_bytes)}")
             else:
-                block.tier = 3
-                if not self.tier3.has_space(block.size_bytes):
-                    self._evict_tier3_to_make_room(block.size_bytes)
-                self.tier3.put(block)
+                # T2 truly full and can't evict — store/keep in T3
+                if not self.tier3.contains(block_id):
+                    block.tier = 3
+                    if not self.tier3.has_space(block.size_bytes):
+                        self._evict_tier3_to_make_room(block.size_bytes)
+                    self.tier3.put(block)
                 canonical_tier = 3
                 self._log("STORE", block_id, f"tier3 size={_fmt(block.size_bytes)}")
 
@@ -256,6 +280,9 @@ class EvicPressManager:
             if promoted:
                 self.stats.promote_tier1()
                 self._log("PROMOTE", block_id, f"→tier1 quality={quality_score:.2f}")
+                # Tier 1 is exclusive — remove Machine B copies to avoid redundancy
+                self.tier2.remove(block_id)
+                self.tier3.remove(block_id)
                 return True, 1  # Signal Machine A to cache in Tier 1
 
             return True, canonical_tier
@@ -294,9 +321,10 @@ class EvicPressManager:
 
     def delete(self, block_id: str) -> bool:
         with self._lock:
-            self.tier1.remove(block_id)
-            removed = self.tier2.remove(block_id) is not None
-            removed |= self.tier3.remove(block_id)
+            in_t1 = self.tier1.remove(block_id) > 0
+            in_t2 = self.tier2.remove(block_id) is not None
+            in_t3 = self.tier3.remove(block_id)
+            removed = in_t1 or in_t2 or in_t3
             if removed:
                 self._log("DELETE", block_id, "removed")
             return removed
