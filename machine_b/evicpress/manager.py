@@ -51,6 +51,8 @@ class Tier1Ledger:
         self._entries: dict[str, tuple[int, float]] = {}
         self._used_bytes: int = 0
         self._lock = threading.RLock()
+        # Blocks evicted from T1 that Machine A needs to return to Machine B
+        self._pending_evictions: deque[str] = deque(maxlen=1000)
 
     def try_admit(self, block_id: str, size_bytes: int, quality_score: float) -> bool:
         """
@@ -90,6 +92,31 @@ class Tier1Ledger:
                 break  # never displace a strictly better block
             del self._entries[bid]
             self._used_bytes -= sz
+            self._pending_evictions.append(bid)  # Machine A must return this data
+
+    def drain_pending_evictions(self, max_n: int = 10) -> list[str]:
+        """Pop up to max_n block_ids that Machine A must evict from T1 and send back."""
+        result = []
+        with self._lock:
+            while self._pending_evictions and len(result) < max_n:
+                result.append(self._pending_evictions.popleft())
+        return result
+
+    def all_entries(self) -> list[dict]:
+        """Snapshot of all T1 ledger entries for the dashboard block browser."""
+        with self._lock:
+            return [
+                {
+                    "block_id":     bid,
+                    "size_bytes":   sz,
+                    "tier":         1,
+                    "quality_score": qs,
+                    "access_count": 0,
+                    "last_access":  0.0,
+                    "created_at":   0.0,
+                }
+                for bid, (sz, qs) in self._entries.items()
+            ]
 
     def remove(self, block_id: str) -> int:
         """Remove block from ledger. Returns size_bytes removed (0 if not present)."""
@@ -228,14 +255,17 @@ class EvicPressManager:
             return True, 3
         return False, 0
 
-    def store(self, block_id: str, data: bytes, quality_score: float = 1.0) -> Tuple[bool, int]:
+    def store(self, block_id: str, data: bytes, quality_score: float = 1.0,
+              is_t1_return: bool = False) -> Tuple[bool, int]:
         """
         Store a block. Machine B decides all tier placement.
         Returns (success, tier_placed).
 
-        tier_placed == 1 means Machine B wants Machine A to also cache this block
-        in its local RAM (Tier 1). The block is additionally stored in Tier 2 or 3
-        on Machine B as the canonical copy.
+        tier_placed == 1 means Machine B wants Machine A to cache this block in its
+        local RAM (Tier 1). Machine B removes its T2/T3 copy — T1 is exclusive.
+
+        is_t1_return=True: Machine A is returning a block evicted from T1.
+        Place in T2/T3 without re-promoting to T1.
         """
         # Compute quality dynamically if caller passed the static default
         if quality_score >= 1.0:
@@ -274,16 +304,17 @@ class EvicPressManager:
                 canonical_tier = 3
                 self._log("STORE", block_id, f"tier3 size={_fmt(block.size_bytes)}")
 
-            # Decide whether to also promote to Tier 1 (Machine A RAM).
-            # Try to admit: Tier1Ledger uses Greedy Knapsack by quality_score.
-            promoted = self.tier1.try_admit(block_id, block.size_bytes, quality_score)
-            if promoted:
-                self.stats.promote_tier1()
-                self._log("PROMOTE", block_id, f"→tier1 quality={quality_score:.2f}")
-                # Tier 1 is exclusive — remove Machine B copies to avoid redundancy
-                self.tier2.remove(block_id)
-                self.tier3.remove(block_id)
-                return True, 1  # Signal Machine A to cache in Tier 1
+            # Decide whether to promote to Tier 1 (Machine A RAM).
+            # Skip if this is a T1 return — would create an infinite eviction loop.
+            if not is_t1_return:
+                promoted = self.tier1.try_admit(block_id, block.size_bytes, quality_score)
+                if promoted:
+                    self.stats.promote_tier1()
+                    self._log("PROMOTE", block_id, f"→tier1 quality={quality_score:.2f}")
+                    # T1 is exclusive — remove Machine B copies
+                    self.tier2.remove(block_id)
+                    self.tier3.remove(block_id)
+                    return True, 1  # Signal Machine A to cache in Tier 1
 
             return True, canonical_tier
 
@@ -499,8 +530,8 @@ class EvicPressManager:
         }
 
     def get_blocks(self) -> list[dict]:
-        """Block listing for the dashboard block browser."""
-        result = []
+        """Block listing for the dashboard block browser — all tiers."""
+        result = self.tier1.all_entries()  # T1 blocks (metadata only)
         for b in self.tier2.all_blocks():
             result.append(b.to_meta())
         for m in self.tier3.all_metas():

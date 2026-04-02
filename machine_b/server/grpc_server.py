@@ -24,18 +24,22 @@ class EvicPressServicer(evicpress_pb2_grpc.EvicPressServiceServicer):
 
     async def Lookup(self, request, context):
         hit, tier = self._m.lookup(request.block_id)
-        return evicpress_pb2.LookupResponse(hit=hit, tier=tier)
+        evictions = self._m.tier1.drain_pending_evictions()
+        return evicpress_pb2.LookupResponse(hit=hit, tier=tier, evict_from_t1=evictions)
 
     async def Store(self, request, context):
         success, tier = self._m.store(
             request.block_id,
             request.data,
             request.quality_score or 1.0,
+            is_t1_return=request.is_t1_return,
         )
+        evictions = self._m.tier1.drain_pending_evictions()
         return evicpress_pb2.StoreResponse(
             success=success,
             tier=tier,
             message=f"stored in tier{tier}",
+            evict_from_t1=evictions,
         )
 
     async def Retrieve(self, request, context):
