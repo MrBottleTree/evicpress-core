@@ -30,7 +30,7 @@ tier3:
 
   # Where to store block files on disk.
   # Use an absolute path to an NVMe-backed directory in production.
-  data_dir: "./data/tier3"
+  data_dir: "/data/kv_cache"
 
 # ---- Prefetching ----
 prefetch:
