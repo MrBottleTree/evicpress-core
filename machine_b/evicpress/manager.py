@@ -2,19 +2,23 @@
 EvicPressManager — the heart of Machine B.
 
 Responsibilities:
-  - Decide where to place a new block (Tier 1 / Tier 2 / Tier 3)
-  - Evict blocks using the Greedy Knapsack algorithm from the paper
-  - Maintain a local ledger of blocks promoted to Machine A RAM (Tier 1)
-    without ever querying Machine A
-  - Promote Tier 3 blocks to Tier 2 on retrieval (opportunistic)
+  - Place every block in Tier 3 (disk) as the canonical copy
+  - Additionally mirror into Tier 2 (B RAM) and/or Tier 1 (A RAM) based on utility
+  - Evict from T2/T1 by simply dropping the cache copy (T3 still has the block)
+  - Evict from T3 only under true pressure (this is the ONLY place data is lost)
   - Accept prefetch hints and process them in the background
   - Expose real-time state for the dashboard
 
-Tier 1 design:
-  Machine B controls Tier 1 (Machine A RAM) by returning tier=1 in StoreResponse.
-  Machine A's GRPCBackend writes the block to its LocalCPUBackend when it sees tier=1.
-  Machine B maintains a local Tier1Ledger as an estimate — it does NOT ping Machine A.
-  The ledger may become stale if Machine A evicts entries; it self-corrects on next access.
+Inclusive tiering:
+  Every block always has a T3 copy while it exists in the system. T1 and T2 are
+  pure cache layers on top. There is NO T1 return protocol — Machine A's
+  LocalCPUBackend can evict its T1 copy on its own; Machine B never loses data
+  because T3 remains.
+
+Tier 1 ledger:
+  Machine B maintains a local accounting of which block_ids it has asked
+  Machine A to cache in its RAM. The ledger may be stale if Machine A evicts
+  under its own LRU; it self-corrects on the next Lookup/Store.
 """
 
 import asyncio
@@ -37,70 +41,68 @@ from .tier_ram import RamTier
 
 class Tier1Ledger:
     """
-    Local-only accounting of which blocks Machine B has promoted to Machine A RAM.
-    Never queries Machine A. May be slightly stale if Machine A evicts entries.
-
-    Admission policy: Greedy Knapsack by quality_score.
-    When full, evict the lowest-quality block if the new block is better.
+    Local-only accounting of blocks Machine B asked Machine A to cache in T1.
+    No return-queue, no ping to Machine A. On T1 pressure we just drop the
+    ledger entry — T3 canonical copy remains on Machine B disk.
     """
 
     def __init__(self, capacity_bytes: int, bandwidth_bytes_per_sec: float) -> None:
         self._capacity = capacity_bytes
         self._bandwidth = bandwidth_bytes_per_sec
-        # block_id → (size_bytes, quality_score)
-        self._entries: dict[str, tuple[int, float]] = {}
+        # block_id → (size_bytes, utility, quant_level)
+        self._entries: dict[str, tuple[int, float, str]] = {}
         self._used_bytes: int = 0
         self._lock = threading.RLock()
-        # Blocks evicted from T1 that Machine A needs to return to Machine B
-        self._pending_evictions: deque[str] = deque(maxlen=1000)
 
-    def try_admit(self, block_id: str, size_bytes: int, quality_score: float) -> bool:
+    def admit(
+        self,
+        block_id: str,
+        size_bytes: int,
+        utility: float,
+        quant_level: str,
+    ) -> bool:
         """
-        Try to admit a block into Tier 1. May evict lower-quality blocks to make room.
-        Returns True if the block was admitted (Machine A should cache it).
+        Admit a block into Tier 1. May drop lower-utility entries to make room.
+        Returns True if Machine A should cache the block in its local RAM.
         """
         with self._lock:
             if block_id in self._entries:
-                return True  # already tracked
+                # Refresh utility/size in case block changed
+                old_size, _, _ = self._entries[block_id]
+                self._used_bytes += size_bytes - old_size
+                self._entries[block_id] = (size_bytes, utility, quant_level)
+                return True
 
             if size_bytes > self._capacity:
                 return False  # block alone exceeds tier capacity
 
-            # Free space by evicting lowest-quality blocks if needed
             if self._used_bytes + size_bytes > self._capacity:
-                self._evict_to_make_room(size_bytes, quality_score)
+                self._drop_to_make_room(size_bytes, utility)
 
             if self._used_bytes + size_bytes > self._capacity:
-                return False  # not worth promoting after eviction attempt
+                return False  # not worth admitting
 
-            self._entries[block_id] = (size_bytes, quality_score)
+            self._entries[block_id] = (size_bytes, utility, quant_level)
             self._used_bytes += size_bytes
             return True
 
-    def _evict_to_make_room(self, needed_bytes: int, new_quality: float) -> None:
-        """Evict lowest-quality entries until enough space is free.
-        Among equal-quality blocks, evicts oldest-inserted first (LRU tiebreak).
-        Never evicts a block with strictly higher quality than the incoming one."""
+    def _drop_to_make_room(self, needed_bytes: int, new_utility: float) -> None:
+        """
+        Drop lowest-utility entries until `needed_bytes` is free. Never displaces
+        a block with strictly higher utility than the incoming one. These are
+        pure drops — T3 still has the canonical copy so no data is lost.
+        """
         candidates = sorted(
-            enumerate(self._entries.items()),
-            key=lambda x: (x[1][1][1], x[0])  # (quality_score asc, insertion_idx asc)
+            self._entries.items(),
+            key=lambda kv: kv[1][1],  # utility asc
         )
-        for _, (bid, (sz, qs)) in candidates:
+        for bid, (sz, util, _ql) in candidates:
             if self._used_bytes + needed_bytes <= self._capacity:
                 break
-            if qs > new_quality:
-                break  # never displace a strictly better block
+            if util > new_utility:
+                break
             del self._entries[bid]
             self._used_bytes -= sz
-            self._pending_evictions.append(bid)  # Machine A must return this data
-
-    def drain_pending_evictions(self, max_n: int = 10) -> list[str]:
-        """Pop up to max_n block_ids that Machine A must evict from T1 and send back."""
-        result = []
-        with self._lock:
-            while self._pending_evictions and len(result) < max_n:
-                result.append(self._pending_evictions.popleft())
-        return result
 
     def all_entries(self) -> list[dict]:
         """Snapshot of all T1 ledger entries for the dashboard block browser."""
@@ -110,12 +112,14 @@ class Tier1Ledger:
                     "block_id":     bid,
                     "size_bytes":   sz,
                     "tier":         1,
-                    "quality_score": qs,
+                    "quality_score": 0.0,
+                    "quant_level":  ql,
                     "access_count": 0,
                     "last_access":  0.0,
                     "created_at":   0.0,
+                    "utility":      util,
                 }
-                for bid, (sz, qs) in self._entries.items()
+                for bid, (sz, util, ql) in self._entries.items()
             ]
 
     def remove(self, block_id: str) -> int:
@@ -222,6 +226,19 @@ def _compute_quality(data: bytes) -> float:
     return round(max(0.1, min(1.0, ratio)), 3)
 
 
+def _new_block_utility(
+    size_bytes: int,
+    quality_score: float,
+    alpha: float,
+    t2_bw: float,
+    total_accesses: int,
+) -> float:
+    """Utility estimate for a freshly-stored block (access_count = 0, tier = 2)."""
+    frequency = 1.0 / (total_accesses + 1)
+    ttft = size_bytes / t2_bw
+    return (alpha * quality_score - ttft) * frequency
+
+
 class EvicPressManager:
     def __init__(self, config: EvicPressConfig) -> None:
         self.config = config
@@ -245,8 +262,6 @@ class EvicPressManager:
 
     def lookup(self, block_id: str) -> Tuple[bool, int]:
         """Returns (hit, tier). tier=0 on miss, 1=Machine A RAM, 2=Machine B RAM, 3=disk."""
-        # Tier 1 check first: if ledger says Machine A has it, return tier=1
-        # so GRPCBackend skips any prefetch and serves directly from Machine A RAM.
         if self.tier1.contains(block_id):
             return True, 1
         if self.tier2.contains(block_id):
@@ -255,97 +270,133 @@ class EvicPressManager:
             return True, 3
         return False, 0
 
-    def store(self, block_id: str, data: bytes, quality_score: float = 1.0,
-              is_t1_return: bool = False) -> Tuple[bool, int]:
+    def store(
+        self,
+        block_id: str,
+        data: bytes,
+        quality_score: float = 1.0,
+    ) -> Tuple[bool, int, str]:
         """
-        Store a block. Machine B decides all tier placement.
-        Returns (success, tier_placed).
+        Store a block under INCLUSIVE tiering semantics:
+          1. T3 always receives the canonical copy.
+          2. If utility is high enough and T2 has room (or can free it), mirror to T2.
+          3. If utility is high enough and T1 ledger admits, promote to T1.
 
-        tier_placed == 1 means Machine B wants Machine A to cache this block in its
-        local RAM (Tier 1). Machine B removes its T2/T3 copy — T1 is exclusive.
-
-        is_t1_return=True: Machine A is returning a block evicted from T1.
-        Place in T2/T3 without re-promoting to T1.
+        Returns (success, primary_tier, quant_level).
+        primary_tier = 1 if Machine A should cache it, else 2 if mirrored to B RAM, else 3.
         """
-        # Compute quality dynamically if caller passed the static default
         if quality_score >= 1.0:
             quality_score = _compute_quality(data)
 
-        block = Block(block_id=block_id, data=data, tier=2, quality_score=quality_score)
+        # For M1 there is no placement policy yet — fp16 only, utility drives
+        # the optional T2/T1 mirrors. M3 replaces this with config-driven bands.
+        quant_level = "fp16"
+        payload = data
+        size = len(payload)
 
         with self._lock:
-            # Preserve access history if block already exists in T2
-            existing_t2 = self.tier2.remove(block_id)
-            if existing_t2:
-                block.access_count = existing_t2.access_count
-                block.created_at   = existing_t2.created_at
-            # If block is already in T3 and T2 has no room for it, leave it there —
-            # don't pull it out of T3 only to put it back. Only remove from T3 if
-            # we're actually going to place it in T2 (checked below).
+            total = self.stats.total_hits + self.stats.total_misses
+            utility = _new_block_utility(
+                size,
+                quality_score,
+                self.config.alpha,
+                self.config.tier2.bandwidth_bytes_per_sec,
+                total,
+            )
 
-            # Place block in Machine B (Tier 2 preferred, Tier 3 fallback)
-            if self.tier2.has_space(block.size_bytes):
-                self.tier3.remove(block_id)  # upgrading from T3 → T2 if present
-                self.tier2.put(block)
-                canonical_tier = 2
-                self._log("STORE", block_id, f"tier2 size={_fmt(block.size_bytes)}")
-            elif self._evict_tier2_to_make_room(block.size_bytes):
-                self.tier3.remove(block_id)  # upgrading from T3 → T2 if present
-                self.tier2.put(block)
-                canonical_tier = 2
-                self._log("STORE", block_id, f"tier2 (after eviction) size={_fmt(block.size_bytes)}")
-            else:
-                # T2 truly full and can't evict — store/keep in T3
-                if not self.tier3.contains(block_id):
-                    block.tier = 3
-                    if not self.tier3.has_space(block.size_bytes):
-                        self._evict_tier3_to_make_room(block.size_bytes)
-                    self.tier3.put(block)
-                canonical_tier = 3
-                self._log("STORE", block_id, f"tier3 size={_fmt(block.size_bytes)}")
+            # Preserve access history if block already exists somewhere.
+            existing = self.tier2.remove(block_id)
+            access_count = existing.access_count if existing else 0
+            created_at   = existing.created_at if existing else time.time()
 
-            # Decide whether to promote to Tier 1 (Machine A RAM).
-            # Skip if this is a T1 return — would create an infinite eviction loop.
-            if not is_t1_return:
-                promoted = self.tier1.try_admit(block_id, block.size_bytes, quality_score)
-                if promoted:
-                    self.stats.promote_tier1()
-                    self._log("PROMOTE", block_id, f"→tier1 quality={quality_score:.2f}")
-                    # T1 is exclusive — remove Machine B copies
-                    self.tier2.remove(block_id)
-                    self.tier3.remove(block_id)
-                    return True, 1  # Signal Machine A to cache in Tier 1
+            # Step 1 — T3 canonical write (free space first if needed).
+            if not self.tier3.has_space(size):
+                self._evict_tier3_to_make_room(size)
+            t3_block = Block(
+                block_id=block_id,
+                data=payload,
+                tier=3,
+                quality_score=quality_score,
+                quant_level=quant_level,
+                access_count=access_count,
+                created_at=created_at,
+            )
+            self.tier3.put(t3_block)
+            self._log("STORE", block_id, f"tier3 size={_fmt(size)} util={utility:.4f}")
 
-            return True, canonical_tier
+            # Step 2 — optional T2 mirror. Always try; on full, evict
+            # lower-utility T2 copies (pure drops, T3 still has them).
+            t2_mirrored = False
+            if self.tier2.has_space(size):
+                self._put_tier2_copy(block_id, payload, quality_score, quant_level,
+                                     access_count, created_at)
+                t2_mirrored = True
+            elif self._evict_tier2_to_make_room(size):
+                self._put_tier2_copy(block_id, payload, quality_score, quant_level,
+                                     access_count, created_at)
+                t2_mirrored = True
 
-    def retrieve(self, block_id: str) -> Optional[Tuple[bytes, int]]:
+            # Step 3 — optional T1 promote.
+            promoted = self.tier1.admit(block_id, size, utility, quant_level)
+            if promoted:
+                self.stats.promote_tier1()
+                self._log("PROMOTE", block_id,
+                          f"→tier1 util={utility:.4f} quant={quant_level}")
+                return True, 1, quant_level
+
+            primary = 2 if t2_mirrored else 3
+            return True, primary, quant_level
+
+    def _put_tier2_copy(
+        self,
+        block_id: str,
+        data: bytes,
+        quality_score: float,
+        quant_level: str,
+        access_count: int,
+        created_at: float,
+    ) -> None:
+        """Place a T2 cache copy. T3 canonical copy is untouched."""
+        self.tier2.put(Block(
+            block_id=block_id,
+            data=data,
+            tier=2,
+            quality_score=quality_score,
+            quant_level=quant_level,
+            access_count=access_count,
+            created_at=created_at,
+        ))
+
+    def retrieve(self, block_id: str) -> Optional[Tuple[bytes, int, str]]:
         """
-        Fetch a block's data. Returns (data, source_tier) or None on miss.
-        Tier 1 hits are served by Machine A without reaching here, so we only
-        see Tier 2 / Tier 3 requests. Opportunistically promotes Tier 3 → Tier 2.
+        Fetch a block's data. Returns (data, source_tier, quant_level) or None.
+        Tier 1 hits are served by Machine A without reaching here. On T3 hit we
+        also COPY (not move) into T2 if space is available, keeping inclusive.
         """
         with self._lock:
-            # Tier 2 check
             block = self.tier2.get(block_id)
             if block:
                 self.stats.hit(2)
                 self._log("RETRIEVE", block_id, "tier2 hit")
-                return block.data, 2
+                return block.data, 2, block.quant_level
 
-            # Tier 3 check
             block = self.tier3.get(block_id)
             if block:
                 self.stats.hit(3)
                 self._log("RETRIEVE", block_id, "tier3 hit")
-                # Opportunistic promotion
-                if self.tier2.has_space(block.size_bytes):
-                    self.tier3.remove(block_id)
-                    block.tier = 2
-                    self.tier2.put(block)
-                    self._log("PROMOTE", block_id, "tier3→tier2")
-                return block.data, 3
+                # Inclusive-copy into T2 if space, leave T3 intact.
+                if not self.tier2.contains(block_id) and self.tier2.has_space(block.size_bytes):
+                    self._put_tier2_copy(
+                        block.block_id,
+                        block.data,
+                        block.quality_score,
+                        block.quant_level,
+                        block.access_count,
+                        block.created_at,
+                    )
+                    self._log("PROMOTE", block_id, "tier3→tier2 (copy)")
+                return block.data, 3, block.quant_level
 
-            # Miss — tier1 ledger may be stale; Machine A already missed too
             self.stats.miss()
             self._log("MISS", block_id, "not found")
             return None
@@ -375,8 +426,8 @@ class EvicPressManager:
 
     async def prefetch_worker(self) -> None:
         """
-        Background asyncio task: moves blocks from Tier 3 → Tier 2 proactively.
-        Runs forever; stops only when the event loop shuts down.
+        Background asyncio task: copies blocks from Tier 3 → Tier 2 proactively.
+        T3 copy is preserved (inclusive). Runs forever; stops only on event-loop shutdown.
         """
         while True:
             block_id = await self.prefetch_queue.get()
@@ -385,10 +436,15 @@ class EvicPressManager:
                     if self.tier3.contains(block_id) and not self.tier2.contains(block_id):
                         block = self.tier3.get(block_id)
                         if block and self.tier2.has_space(block.size_bytes):
-                            self.tier3.remove(block_id)
-                            block.tier = 2
-                            self.tier2.put(block)
-                            self._log("PREFETCH", block_id, "tier3→tier2")
+                            self._put_tier2_copy(
+                                block.block_id,
+                                block.data,
+                                block.quality_score,
+                                block.quant_level,
+                                block.access_count,
+                                block.created_at,
+                            )
+                            self._log("PREFETCH", block_id, "tier3→tier2 (copy)")
             finally:
                 self.prefetch_queue.task_done()
 
@@ -398,10 +454,8 @@ class EvicPressManager:
 
     def _evict_tier2_to_make_room(self, needed_bytes: int) -> bool:
         """
-        Move lowest-utility Tier 2 blocks to Tier 3 until `needed_bytes` is free.
-        Returns True if enough space was reclaimed.
-        When a block is demoted from Tier 2, it is also removed from the Tier 1 ledger
-        (Machine A's copy becomes lower priority; Machine B's canonical copy is now slower).
+        Drop lowest-utility Tier 2 cache copies until `needed_bytes` is free.
+        Under inclusive tiering this is a pure drop — T3 retains every block.
         """
         total = self.stats.total_hits + self.stats.total_misses
         alpha = self.config.alpha
@@ -422,23 +476,15 @@ class EvicPressManager:
                 continue
             freed += removed.size_bytes
             self.stats.evict()
-
-            # Remove from Tier 1 ledger: canonical copy is going to slower Tier 3
-            self.tier1.remove(removed.block_id)
-
-            # Push to Tier 3 (make room there first if needed)
-            if not self.tier3.has_space(removed.size_bytes):
-                self._evict_tier3_to_make_room(removed.size_bytes)
-            removed.tier = 3
-            self.tier3.put(removed)
-            self._log("EVICT", block.block_id, "tier2→tier3")
+            self._log("EVICT", block.block_id, "tier2 drop (T3 canonical)")
 
         return freed >= needed_bytes
 
     def _evict_tier3_to_make_room(self, needed_bytes: int) -> None:
         """
         Delete lowest-utility Tier 3 blocks until `needed_bytes` is free.
-        Also removes evicted blocks from the Tier 1 ledger.
+        This is the ONLY place data actually leaves the system — also drop
+        any T2/T1 cache copies so stale entries don't linger.
         """
         total = self.stats.total_hits + self.stats.total_misses
         alpha = self.config.alpha
@@ -456,11 +502,13 @@ class EvicPressManager:
         for meta in candidates:
             if freed >= needed_bytes:
                 break
-            if self.tier3.remove(meta["block_id"]):
+            bid = meta["block_id"]
+            if self.tier3.remove(bid):
                 freed += meta["size_bytes"]
                 self.stats.evict()
-                self.tier1.remove(meta["block_id"])  # stale ledger entry
-                self._log("EVICT", meta["block_id"], "tier3→deleted")
+                self.tier2.remove(bid)
+                self.tier1.remove(bid)
+                self._log("EVICT", bid, "tier3→deleted")
 
     # ────────────────────────────────────────── #
     #  Dashboard state export                    #

@@ -24,29 +24,25 @@ class EvicPressServicer(evicpress_pb2_grpc.EvicPressServiceServicer):
 
     async def Lookup(self, request, context):
         hit, tier = self._m.lookup(request.block_id)
-        evictions = self._m.tier1.drain_pending_evictions()
-        return evicpress_pb2.LookupResponse(hit=hit, tier=tier, evict_from_t1=evictions)
+        return evicpress_pb2.LookupResponse(hit=hit, tier=tier)
 
     async def Store(self, request, context):
-        success, tier = self._m.store(
+        success, tier, _quant = self._m.store(
             request.block_id,
             request.data,
             request.quality_score or 1.0,
-            is_t1_return=request.is_t1_return,
         )
-        evictions = self._m.tier1.drain_pending_evictions()
         return evicpress_pb2.StoreResponse(
             success=success,
             tier=tier,
             message=f"stored in tier{tier}",
-            evict_from_t1=evictions,
         )
 
     async def Retrieve(self, request, context):
         result = self._m.retrieve(request.block_id)
         if result is None:
             return evicpress_pb2.RetrieveResponse(found=False, data=b"", tier=0)
-        data, tier = result
+        data, tier, _quant = result
         return evicpress_pb2.RetrieveResponse(found=True, data=data, tier=tier)
 
     async def Prefetch(self, request, context):
@@ -60,6 +56,7 @@ class EvicPressServicer(evicpress_pb2_grpc.EvicPressServiceServicer):
     async def GetStats(self, request, context):
         state = self._m.get_state()
         s  = state["stats"]
+        t1 = state["tier1"]
         t2 = state["tier2"]
         t3 = state["tier3"]
         return evicpress_pb2.StatsResponse(
@@ -73,6 +70,9 @@ class EvicPressServicer(evicpress_pb2_grpc.EvicPressServiceServicer):
             tier3_hits=s["tier3_hits"],
             hit_rate=s["hit_rate"],
             evictions=s["evictions"],
+            tier1_blocks=t1["block_count"],
+            tier1_bytes=t1["used_bytes"],
+            tier1_promotions=s["tier1_promotions"],
         )
 
 

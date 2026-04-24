@@ -16,6 +16,7 @@ class Block:
     data: bytes         # Raw serialized KV tensor — opaque to Machine B
     tier: int           # Current storage tier: 2 = RAM, 3 = Disk
     quality_score: float = 1.0   # 0.0–1.0, provided by Machine A (compression sensitivity)
+    quant_level: str    = "fp16"  # "fp16" | "int8" | "int4" — applied by Machine B
     access_count: int   = 0
     last_access: float  = field(default_factory=_time)
     created_at: float   = field(default_factory=_time)
@@ -54,6 +55,7 @@ class Block:
             "size_bytes":   self.size_bytes,
             "tier":         self.tier,
             "quality_score": self.quality_score,
+            "quant_level":  self.quant_level,
             "access_count": self.access_count,
             "last_access":  self.last_access,
             "created_at":   self.created_at,

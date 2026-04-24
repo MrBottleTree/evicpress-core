@@ -109,6 +109,7 @@ class DiskTier:
                 data=data,
                 tier=3,
                 quality_score=meta["quality_score"],
+                quant_level=meta.get("quant_level", "fp16"),
                 access_count=meta["access_count"],
                 last_access=meta["last_access"],
                 created_at=meta["created_at"],
