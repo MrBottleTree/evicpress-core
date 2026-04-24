@@ -31,6 +31,8 @@ from typing import Optional, Tuple
 
 from .block import Block
 from .config import EvicPressConfig, PlacementBand, PlacementConfig
+from .quantize import dequantize as _dequantize_bytes
+from .quantize import quantize as _quantize_bytes
 from .tier_disk import DiskTier
 from .tier_ram import RamTier
 
@@ -319,12 +321,13 @@ class EvicPressManager:
                 total,
             )
 
-            # Utility → (tier_set, quant_level). Quantization is still a no-op
-            # byte-wise until M4 wires in real torch-based quant; for now the
-            # payload stays fp16 on the wire and the level is recorded as
-            # metadata only.
+            # Utility → (tier_set, quant_level). If quant is enabled in config
+            # Machine B re-encodes the payload before storing it; the wire-level
+            # format Machine A sees is always fp16 (dequant happens on retrieve).
             tier_set, quant_level = _placement_decision(utility, self.config.placement)
-            payload = data
+            if not self.config.quantization.enabled:
+                quant_level = "fp16"
+            payload = _quantize_bytes(data, quant_level) if quant_level != "fp16" else data
             size = len(payload)
 
             # Preserve access history if block already exists somewhere.
@@ -396,14 +399,18 @@ class EvicPressManager:
             block = self.tier2.get(block_id)
             if block:
                 self.stats.hit(2)
-                self._log("RETRIEVE", block_id, "tier2 hit")
-                return block.data, 2, block.quant_level
+                self._log("RETRIEVE", block_id,
+                          f"tier2 hit quant={block.quant_level}")
+                return _dequantize_bytes(block.data, block.quant_level), 2, block.quant_level
 
             block = self.tier3.get(block_id)
             if block:
                 self.stats.hit(3)
-                self._log("RETRIEVE", block_id, "tier3 hit")
-                # Inclusive-copy into T2 if space, leave T3 intact.
+                self._log("RETRIEVE", block_id,
+                          f"tier3 hit quant={block.quant_level}")
+                # Inclusive-copy into T2 if space, leave T3 intact. The cached
+                # copy keeps the quantized payload — dequant only happens on
+                # the wire reply below.
                 if not self.tier2.contains(block_id) and self.tier2.has_space(block.size_bytes):
                     self._put_tier2_copy(
                         block.block_id,
@@ -414,7 +421,7 @@ class EvicPressManager:
                         block.created_at,
                     )
                     self._log("PROMOTE", block_id, "tier3→tier2 (copy)")
-                return block.data, 3, block.quant_level
+                return _dequantize_bytes(block.data, block.quant_level), 3, block.quant_level
 
             self.stats.miss()
             self._log("MISS", block_id, "not found")

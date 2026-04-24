@@ -4,3 +4,5 @@ protobuf>=4.25.0
 fastapi>=0.109.0
 uvicorn[standard]>=0.25.0
 pyyaml>=6.0.1
+# CPU-only is enough for Machine B — quant/dequant runs on the block payload.
+torch>=2.2.0
