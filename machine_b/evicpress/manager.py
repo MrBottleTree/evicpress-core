@@ -555,6 +555,21 @@ class EvicPressManager:
             for o in list(self._recent_ops)
         ]
 
+        quant_breakdown = {"fp16": 0, "int8": 0, "int4": 0}
+        for b in self.tier2.all_blocks():
+            quant_breakdown[b.quant_level] = quant_breakdown.get(b.quant_level, 0) + 1
+        for m in self.tier3.all_metas():
+            ql = m.get("quant_level", "fp16")
+            quant_breakdown[ql] = quant_breakdown.get(ql, 0) + 1
+        for e in self.tier1.all_entries():
+            ql = e.get("quant_level", "fp16")
+            quant_breakdown[ql] = quant_breakdown.get(ql, 0) + 1
+
+        placement_bands = [
+            {"name": b.name, "min_utility": b.min_utility, "tiers": b.tiers, "quant": b.quant}
+            for b in self.config.placement.bands
+        ]
+
         return {
             "tier1": {
                 "used_bytes":    self.tier1.used_bytes,
@@ -584,6 +599,7 @@ class EvicPressManager:
                 "evictions":        self.stats.evictions,
                 "hit_rate":         hit_rate,
                 "total_ops":        self.stats.total_ops,
+                "quant_breakdown":  quant_breakdown,
             },
             "recent_ops": ops,
             "config": {
@@ -597,6 +613,8 @@ class EvicPressManager:
                 "prefetch_enabled":    self.config.prefetch_enabled,
                 "server_port":         self.config.server_port,
                 "data_dir":            self.config.tier3.data_dir,
+                "quant_enabled":       self.config.quantization.enabled,
+                "placement_bands":     placement_bands,
             },
             "prefetch_queue_size": (
                 self.prefetch_queue.qsize() if self.prefetch_queue else 0

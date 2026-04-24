@@ -250,6 +250,7 @@
     <div class="panel-title" style="color:var(--purple);font-size:10px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">
       Block Browser
       <span id="blkCount" style="color:var(--muted);font-weight:normal">0 blocks</span>
+      <span id="quantBreakdown" style="color:var(--muted);font-weight:normal;margin-left:10px">fp16: 0 · int8: 0 · int4: 0</span>
     </div>
     <input type="text" class="search-bar" id="blkSearch" placeholder="Filter by block ID…">
     <div class="tbl-wrap">
@@ -258,6 +259,7 @@
           <tr>
             <th>Block ID</th>
             <th>Tier</th>
+            <th>Quant</th>
             <th>Size</th>
             <th>Accesses</th>
             <th>Quality</th>
@@ -266,7 +268,7 @@
           </tr>
         </thead>
         <tbody id="blkTbody">
-          <tr><td colspan="7" class="empty-state">No blocks stored yet.</td></tr>
+          <tr><td colspan="8" class="empty-state">No blocks stored yet.</td></tr>
         </tbody>
       </table>
     </div>
@@ -329,6 +331,10 @@ function applyState(state) {
   const pq = state.prefetch_queue_size || 0;
   setBar('prefetchBar', Math.min(pq / 64, 1));
 
+  const qb = s.quant_breakdown || {fp16: 0, int8: 0, int4: 0};
+  set('quantBreakdown',
+      `fp16: ${qb.fp16 || 0} · int8: ${qb.int8 || 0} · int4: ${qb.int4 || 0}`);
+
   // Config panel
   set('cfgAlpha',   c.alpha.toFixed(2));
   set('cfgT1cap',   (c.tier1_capacity_gb || 0).toFixed(1) + ' GB');
@@ -382,13 +388,14 @@ function renderBlocks(filter) {
 
   const tbody = document.getElementById('blkTbody');
   if (filtered.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No blocks match.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No blocks match.</td></tr>';
     return;
   }
   tbody.innerHTML = filtered.slice(0, 200).map(b => `
     <tr>
       <td class="mono">${esc(b.block_id.substring(0,36))}…</td>
       <td class="t${b.tier}">Tier ${b.tier}</td>
+      <td>${esc(b.quant_level || 'fp16')}</td>
       <td>${fmtBytes(b.size_bytes)}</td>
       <td>${b.access_count}</td>
       <td>${(b.quality_score*100).toFixed(0)}%</td>
