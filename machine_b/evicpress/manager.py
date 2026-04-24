@@ -324,10 +324,21 @@ class EvicPressManager:
             # Utility → (tier_set, quant_level). If quant is enabled in config
             # Machine B re-encodes the payload before storing it; the wire-level
             # format Machine A sees is always fp16 (dequant happens on retrieve).
+            # If the payload isn't a torch.save()'d tensor (e.g. smoke tests
+            # using raw bytes) we fall back to fp16 so the Store still succeeds.
             tier_set, quant_level = _placement_decision(utility, self.config.placement)
             if not self.config.quantization.enabled:
                 quant_level = "fp16"
-            payload = _quantize_bytes(data, quant_level) if quant_level != "fp16" else data
+            if quant_level == "fp16":
+                payload = data
+            else:
+                try:
+                    payload = _quantize_bytes(data, quant_level)
+                except Exception as e:
+                    self._log("STORE", block_id,
+                              f"quant {quant_level} failed ({type(e).__name__}); fp16 fallback")
+                    quant_level = "fp16"
+                    payload = data
             size = len(payload)
 
             # Preserve access history if block already exists somewhere.
