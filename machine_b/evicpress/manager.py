@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 from .block import Block
-from .config import EvicPressConfig
+from .config import EvicPressConfig, PlacementBand, PlacementConfig
 from .tier_disk import DiskTier
 from .tier_ram import RamTier
 
@@ -239,6 +239,27 @@ def _new_block_utility(
     return (alpha * quality_score - ttft) * frequency
 
 
+def _placement_decision(
+    utility: float,
+    policy: PlacementConfig,
+) -> tuple[set[int], str]:
+    """
+    Resolve (tier_set, quant_level) from the first matching band. Bands are
+    pre-sorted descending by min_utility, so we scan top-down. T3 is always
+    forced in because it is the canonical tier under inclusive semantics.
+    """
+    match = policy.bands[-1] if policy.bands else PlacementBand(
+        name="default", min_utility=0.0, tiers=[3], quant="fp16",
+    )
+    for band in policy.bands:
+        if utility >= band.min_utility:
+            match = band
+            break
+    tiers = set(match.tiers)
+    tiers.add(3)
+    return tiers, match.quant
+
+
 class EvicPressManager:
     def __init__(self, config: EvicPressConfig) -> None:
         self.config = config
@@ -288,28 +309,30 @@ class EvicPressManager:
         if quality_score >= 1.0:
             quality_score = _compute_quality(data)
 
-        # For M1 there is no placement policy yet — fp16 only, utility drives
-        # the optional T2/T1 mirrors. M3 replaces this with config-driven bands.
-        quant_level = "fp16"
-        payload = data
-        size = len(payload)
-
         with self._lock:
             total = self.stats.total_hits + self.stats.total_misses
             utility = _new_block_utility(
-                size,
+                len(data),
                 quality_score,
                 self.config.alpha,
                 self.config.tier2.bandwidth_bytes_per_sec,
                 total,
             )
 
+            # Utility → (tier_set, quant_level). Quantization is still a no-op
+            # byte-wise until M4 wires in real torch-based quant; for now the
+            # payload stays fp16 on the wire and the level is recorded as
+            # metadata only.
+            tier_set, quant_level = _placement_decision(utility, self.config.placement)
+            payload = data
+            size = len(payload)
+
             # Preserve access history if block already exists somewhere.
             existing = self.tier2.remove(block_id)
             access_count = existing.access_count if existing else 0
             created_at   = existing.created_at if existing else time.time()
 
-            # Step 1 — T3 canonical write (free space first if needed).
+            # Step 1 — T3 canonical write (inclusive invariant; T3 always writes).
             if not self.tier3.has_space(size):
                 self._evict_tier3_to_make_room(size)
             t3_block = Block(
@@ -322,23 +345,19 @@ class EvicPressManager:
                 created_at=created_at,
             )
             self.tier3.put(t3_block)
-            self._log("STORE", block_id, f"tier3 size={_fmt(size)} util={utility:.4f}")
+            self._log("STORE", block_id,
+                      f"tier3 size={_fmt(size)} util={utility:.4f} quant={quant_level}")
 
-            # Step 2 — optional T2 mirror. Always try; on full, evict
-            # lower-utility T2 copies (pure drops, T3 still has them).
+            # Step 2 — optional T2 mirror, iff the band selected T2.
             t2_mirrored = False
-            if self.tier2.has_space(size):
-                self._put_tier2_copy(block_id, payload, quality_score, quant_level,
-                                     access_count, created_at)
-                t2_mirrored = True
-            elif self._evict_tier2_to_make_room(size):
-                self._put_tier2_copy(block_id, payload, quality_score, quant_level,
-                                     access_count, created_at)
-                t2_mirrored = True
+            if 2 in tier_set:
+                if self.tier2.has_space(size) or self._evict_tier2_to_make_room(size):
+                    self._put_tier2_copy(block_id, payload, quality_score, quant_level,
+                                         access_count, created_at)
+                    t2_mirrored = True
 
-            # Step 3 — optional T1 promote.
-            promoted = self.tier1.admit(block_id, size, utility, quant_level)
-            if promoted:
+            # Step 3 — optional T1 promote, iff the band selected T1.
+            if 1 in tier_set and self.tier1.admit(block_id, size, utility, quant_level):
                 self.stats.promote_tier1()
                 self._log("PROMOTE", block_id,
                           f"→tier1 util={utility:.4f} quant={quant_level}")

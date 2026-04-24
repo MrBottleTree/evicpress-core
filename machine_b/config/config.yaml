@@ -58,6 +58,31 @@ dashboard:
   host: "0.0.0.0"
   port: 8080
 
+# ---- Quantization ----
+# Controls which quantization levels Machine B may apply when storing a block.
+# M4 enables real torch-based quantization; until then all blocks stay at fp16
+# regardless of what placement bands request.
+quantization:
+  enabled: true
+  # Approximate size multipliers — used for capacity planning / dashboard stats.
+  size_multiplier:
+    fp16: 1.00
+    int8: 0.50
+    int4: 0.25
+
+# ---- Placement policy ----
+# Utility value drives BOTH the tier set and the quantization level.
+# Bands are evaluated in order; first band whose min_utility <= block_utility
+# wins. `tiers` lists every tier that should hold a copy — Tier 3 is always
+# forced in regardless of what the band lists (it is the canonical tier).
+# Typical tuning: lower min_utility => more blocks in that band.
+placement:
+  bands:
+    - { name: hot,  min_utility: 0.8, tiers: [1, 2, 3], quant: fp16 }
+    - { name: warm, min_utility: 0.3, tiers: [2, 3],    quant: fp16 }
+    - { name: cool, min_utility: 0.1, tiers: [2, 3],    quant: int8 }
+    - { name: cold, min_utility: 0.0, tiers: [3],       quant: int4 }
+
 # ---- Logging / Debug ----
 logging:
   # How many recent operations to keep in the in-memory ring buffer.
