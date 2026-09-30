@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import threading
+import time
 from typing import Optional
 
 from .block import Block
@@ -91,7 +92,7 @@ class DiskTier:
         with self._lock:
             return block_id in self._index
 
-    def get(self, block_id: str) -> Optional[Block]:
+    def get(self, block_id: str, record_access: bool = True) -> Optional[Block]:
         """Read block from disk. Updates access metadata. None if absent."""
         with self._lock:
             if block_id not in self._index:
@@ -113,10 +114,31 @@ class DiskTier:
                 access_count=meta["access_count"],
                 last_access=meta["last_access"],
                 created_at=meta["created_at"],
+                parent_id=meta.get("parent_id", ""),
+                layer=meta.get("layer", -1),
+                kv_head=meta.get("kv_head", -1),
+                token_count=meta.get("token_count", 0),
             )
-            block.touch()
-            self._write_meta(block)   # Persist updated access count
+            if record_access:
+                block.touch()
+                self._write_meta(block)
             return block
+
+    def get_meta(self, block_id: str) -> Optional[dict]:
+        """Return a detached metadata snapshot without reading/touching KV."""
+        with self._lock:
+            meta = self._index.get(block_id)
+            return dict(meta) if meta is not None else None
+
+    def record_access(self, block_id: str) -> None:
+        """Record a head served from another tier without reading its disk blob."""
+        with self._lock:
+            if block_id in self._index:
+                meta = self._index[block_id]
+                meta["access_count"] += 1
+                meta["last_access"] = time.time()
+                with open(self._meta_path(block_id), "w") as stream:
+                    json.dump(meta, stream)
 
     def put(self, block: Block) -> bool:
         """

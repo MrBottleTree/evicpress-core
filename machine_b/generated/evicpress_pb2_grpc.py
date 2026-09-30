@@ -5,7 +5,7 @@ import warnings
 
 from generated import evicpress_pb2 as evicpress__pb2
 
-GRPC_GENERATED_VERSION = '1.80.0'
+GRPC_GENERATED_VERSION = '1.78.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -28,6 +28,10 @@ if _version_not_supported:
 class EvicPressServiceStub(object):
     """EvicPressService is Machine B's gRPC interface.
     Machine A calls these to store, retrieve, prefetch, and inspect KV cache blocks.
+
+    Tiering is INCLUSIVE: Machine B's disk (T3) always holds a canonical copy of
+    every block. T1 (Machine A RAM) and T2 (Machine B RAM) are pure cache copies.
+    Evicting from T1/T2 is a drop — data is never lost until T3 evicts.
     """
 
     def __init__(self, channel):
@@ -66,11 +70,45 @@ class EvicPressServiceStub(object):
                 request_serializer=evicpress__pb2.StatsRequest.SerializeToString,
                 response_deserializer=evicpress__pb2.StatsResponse.FromString,
                 _registered_method=True)
+        self.StoreHeads = channel.unary_unary(
+                '/evicpress.EvicPressService/StoreHeads',
+                request_serializer=evicpress__pb2.HeadStoreRequest.SerializeToString,
+                response_deserializer=evicpress__pb2.HeadGroupResponse.FromString,
+                _registered_method=True)
+        self.LookupHeads = channel.unary_unary(
+                '/evicpress.EvicPressService/LookupHeads',
+                request_serializer=evicpress__pb2.HeadReadRequest.SerializeToString,
+                response_deserializer=evicpress__pb2.HeadBatchResponse.FromString,
+                _registered_method=True)
+        self.RetrieveHeads = channel.unary_unary(
+                '/evicpress.EvicPressService/RetrieveHeads',
+                request_serializer=evicpress__pb2.HeadReadRequest.SerializeToString,
+                response_deserializer=evicpress__pb2.HeadBatchResponse.FromString,
+                _registered_method=True)
+        self.DeleteHeads = channel.unary_unary(
+                '/evicpress.EvicPressService/DeleteHeads',
+                request_serializer=evicpress__pb2.HeadDeleteRequest.SerializeToString,
+                response_deserializer=evicpress__pb2.DeleteResponse.FromString,
+                _registered_method=True)
+        self.ReleaseHeads = channel.unary_unary(
+                '/evicpress.EvicPressService/ReleaseHeads',
+                request_serializer=evicpress__pb2.HeadLeaseRequest.SerializeToString,
+                response_deserializer=evicpress__pb2.DeleteResponse.FromString,
+                _registered_method=True)
+        self.SyncHeadTier1 = channel.unary_unary(
+                '/evicpress.EvicPressService/SyncHeadTier1',
+                request_serializer=evicpress__pb2.HeadTier1Request.SerializeToString,
+                response_deserializer=evicpress__pb2.HeadTier1Response.FromString,
+                _registered_method=True)
 
 
 class EvicPressServiceServicer(object):
     """EvicPressService is Machine B's gRPC interface.
     Machine A calls these to store, retrieve, prefetch, and inspect KV cache blocks.
+
+    Tiering is INCLUSIVE: Machine B's disk (T3) always holds a canonical copy of
+    every block. T1 (Machine A RAM) and T2 (Machine B RAM) are pure cache copies.
+    Evicting from T1/T2 is a drop — data is never lost until T3 evicts.
     """
 
     def Lookup(self, request, context):
@@ -115,6 +153,43 @@ class EvicPressServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def StoreHeads(self, request, context):
+        """Optional head-granularity path. Legacy whole-chunk RPCs stay unchanged.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def LookupHeads(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RetrieveHeads(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeleteHeads(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ReleaseHeads(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SyncHeadTier1(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_EvicPressServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -148,6 +223,36 @@ def add_EvicPressServiceServicer_to_server(servicer, server):
                     request_deserializer=evicpress__pb2.StatsRequest.FromString,
                     response_serializer=evicpress__pb2.StatsResponse.SerializeToString,
             ),
+            'StoreHeads': grpc.unary_unary_rpc_method_handler(
+                    servicer.StoreHeads,
+                    request_deserializer=evicpress__pb2.HeadStoreRequest.FromString,
+                    response_serializer=evicpress__pb2.HeadGroupResponse.SerializeToString,
+            ),
+            'LookupHeads': grpc.unary_unary_rpc_method_handler(
+                    servicer.LookupHeads,
+                    request_deserializer=evicpress__pb2.HeadReadRequest.FromString,
+                    response_serializer=evicpress__pb2.HeadBatchResponse.SerializeToString,
+            ),
+            'RetrieveHeads': grpc.unary_unary_rpc_method_handler(
+                    servicer.RetrieveHeads,
+                    request_deserializer=evicpress__pb2.HeadReadRequest.FromString,
+                    response_serializer=evicpress__pb2.HeadBatchResponse.SerializeToString,
+            ),
+            'DeleteHeads': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteHeads,
+                    request_deserializer=evicpress__pb2.HeadDeleteRequest.FromString,
+                    response_serializer=evicpress__pb2.DeleteResponse.SerializeToString,
+            ),
+            'ReleaseHeads': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReleaseHeads,
+                    request_deserializer=evicpress__pb2.HeadLeaseRequest.FromString,
+                    response_serializer=evicpress__pb2.DeleteResponse.SerializeToString,
+            ),
+            'SyncHeadTier1': grpc.unary_unary_rpc_method_handler(
+                    servicer.SyncHeadTier1,
+                    request_deserializer=evicpress__pb2.HeadTier1Request.FromString,
+                    response_serializer=evicpress__pb2.HeadTier1Response.SerializeToString,
+            ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
             'evicpress.EvicPressService', rpc_method_handlers)
@@ -159,6 +264,10 @@ def add_EvicPressServiceServicer_to_server(servicer, server):
 class EvicPressService(object):
     """EvicPressService is Machine B's gRPC interface.
     Machine A calls these to store, retrieve, prefetch, and inspect KV cache blocks.
+
+    Tiering is INCLUSIVE: Machine B's disk (T3) always holds a canonical copy of
+    every block. T1 (Machine A RAM) and T2 (Machine B RAM) are pure cache copies.
+    Evicting from T1/T2 is a drop — data is never lost until T3 evicts.
     """
 
     @staticmethod
@@ -313,6 +422,168 @@ class EvicPressService(object):
             '/evicpress.EvicPressService/GetStats',
             evicpress__pb2.StatsRequest.SerializeToString,
             evicpress__pb2.StatsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def StoreHeads(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/evicpress.EvicPressService/StoreHeads',
+            evicpress__pb2.HeadStoreRequest.SerializeToString,
+            evicpress__pb2.HeadGroupResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def LookupHeads(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/evicpress.EvicPressService/LookupHeads',
+            evicpress__pb2.HeadReadRequest.SerializeToString,
+            evicpress__pb2.HeadBatchResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RetrieveHeads(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/evicpress.EvicPressService/RetrieveHeads',
+            evicpress__pb2.HeadReadRequest.SerializeToString,
+            evicpress__pb2.HeadBatchResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteHeads(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/evicpress.EvicPressService/DeleteHeads',
+            evicpress__pb2.HeadDeleteRequest.SerializeToString,
+            evicpress__pb2.DeleteResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReleaseHeads(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/evicpress.EvicPressService/ReleaseHeads',
+            evicpress__pb2.HeadLeaseRequest.SerializeToString,
+            evicpress__pb2.DeleteResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SyncHeadTier1(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/evicpress.EvicPressService/SyncHeadTier1',
+            evicpress__pb2.HeadTier1Request.SerializeToString,
+            evicpress__pb2.HeadTier1Response.FromString,
             options,
             channel_credentials,
             insecure,

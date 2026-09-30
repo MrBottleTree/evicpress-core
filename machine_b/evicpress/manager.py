@@ -278,6 +278,54 @@ class EvicPressManager:
 
         # Filled in main.py once the asyncio loop is running
         self.prefetch_queue: Optional[asyncio.Queue] = None
+        # Head RPCs share the same serialization lock as legacy store/eviction.
+        self.operation_lock = self._lock
+        from .head_groups import HeadGroupStore
+        self.head_groups = HeadGroupStore(self)
+
+    def log_operation(self, op: str, block_id: str, detail: str = "") -> None:
+        """Public logging seam for the head-group adapter."""
+        self._log(op, block_id, detail)
+
+    def head_utility(self, meta: dict) -> float:
+        """Existing objective, normalized by logical head-parent demand reads."""
+        total = (self.head_groups.parent_requests if meta.get("parent_id")
+                 else self.stats.total_hits + self.stats.total_misses)
+        bw = (self.config.tier2.bandwidth_bytes_per_sec if meta.get("tier") == 2
+              else self.config.tier3.bandwidth_bytes_per_sec)
+        return ((self.config.alpha * meta["quality_score"] - meta["size_bytes"] / bw)
+                * (meta["access_count"] + 1) / (total + 1))
+
+    def reserve_head_disk(self, additional: int, protected: set[str]) -> bool:
+        """Plan enough unleased victims before evicting; never partial-admit."""
+        deficit = additional - (self.tier3.capacity_bytes - self.tier3.used_bytes)
+        if deficit <= 0:
+            return True
+        victims, freed = [], 0
+        for meta in sorted(self.tier3.all_metas(), key=self.head_utility):
+            bid = meta["block_id"]
+            if bid in protected or self.head_groups.is_pinned(bid):
+                continue
+            victims.append(bid)
+            freed += meta["size_bytes"]
+            if freed >= deficit:
+                break
+        if freed < deficit:
+            return False
+        for bid in victims:
+            self.delete(bid)
+            self.stats.evict()
+        return True
+
+    def mirror_head(self, block: Block) -> bool:
+        """Optional per-head T2 cache copy; canonical data stays on disk."""
+        from dataclasses import replace
+        if block.size_bytes > self.tier2.capacity_bytes:
+            return False
+        if not self.tier2.has_space(block.size_bytes):
+            self._evict_tier2_to_make_room(block.size_bytes)
+        return self.tier2.has_space(block.size_bytes) and self.tier2.put(
+            replace(block, tier=2))
 
     # ────────────────────────────────────────── #
     #  Core operations                           #
@@ -443,12 +491,17 @@ class EvicPressManager:
 
     def delete(self, block_id: str) -> bool:
         with self._lock:
+            if self.head_groups.is_pinned(block_id):
+                return False
+            meta = self.tier3.get_meta(block_id) or {}
             in_t1 = self.tier1.remove(block_id) > 0
             in_t2 = self.tier2.remove(block_id) is not None
             in_t3 = self.tier3.remove(block_id)
             removed = in_t1 or in_t2 or in_t3
             if removed:
                 self._log("DELETE", block_id, "removed")
+                self.head_groups.owners.pop(block_id, None)
+                self.head_groups.forget_empty_parent(meta.get("parent_id", ""))
             return removed
 
     def queue_prefetch(self, block_ids: list[str]) -> int:
@@ -474,16 +527,23 @@ class EvicPressManager:
             try:
                 with self._lock:
                     if self.tier3.contains(block_id) and not self.tier2.contains(block_id):
-                        block = self.tier3.get(block_id)
+                        meta = self.tier3.get_meta(block_id) or {}
+                        # A prefetch is not a demand access for head utility.
+                        block = self.tier3.get(
+                            block_id, record_access=not bool(meta.get("parent_id")))
                         if block and self.tier2.has_space(block.size_bytes):
-                            self._put_tier2_copy(
-                                block.block_id,
-                                block.data,
-                                block.quality_score,
-                                block.quant_level,
-                                block.access_count,
-                                block.created_at,
-                            )
+                            if block.parent_id:
+                                from dataclasses import replace
+                                self.tier2.put(replace(block, tier=2))
+                            else:
+                                self._put_tier2_copy(
+                                    block.block_id,
+                                    block.data,
+                                    block.quality_score,
+                                    block.quant_level,
+                                    block.access_count,
+                                    block.created_at,
+                                )
                             self._log("PREFETCH", block_id, "tier3→tier2 (copy)")
             finally:
                 self.prefetch_queue.task_done()
@@ -504,7 +564,8 @@ class EvicPressManager:
 
         candidates = sorted(
             self.tier2.all_blocks(),
-            key=lambda b: b.utility(alpha, t2bw, t3bw, total)
+            key=lambda b: self.head_utility(b.to_meta()) if b.parent_id
+            else b.utility(alpha, t2bw, t3bw, total)
         )
 
         freed = 0
@@ -532,6 +593,8 @@ class EvicPressManager:
         t3bw  = self.config.tier3.bandwidth_bytes_per_sec
 
         def _meta_utility(m: dict) -> float:
+            if m.get("parent_id"):
+                return self.head_utility(m)
             freq = (m["access_count"] + 1) / (total + 1)
             ttft = m["size_bytes"] / t3bw
             return (alpha * m["quality_score"] - ttft) * freq
@@ -543,11 +606,15 @@ class EvicPressManager:
             if freed >= needed_bytes:
                 break
             bid = meta["block_id"]
+            if self.head_groups.is_pinned(bid):
+                continue
             if self.tier3.remove(bid):
                 freed += meta["size_bytes"]
                 self.stats.evict()
                 self.tier2.remove(bid)
                 self.tier1.remove(bid)
+                self.head_groups.owners.pop(bid, None)
+                self.head_groups.forget_empty_parent(meta.get("parent_id", ""))
                 self._log("EVICT", bid, "tier3→deleted")
 
     # ────────────────────────────────────────── #
@@ -604,6 +671,7 @@ class EvicPressManager:
                 "utilization":   self.tier3.utilization,
             },
             "stats": {
+                **self.head_groups.counters,
                 "total_hits":       self.stats.total_hits,
                 "total_misses":     self.stats.total_misses,
                 "tier1_hits":       self.stats.tier1_hits,
@@ -617,6 +685,7 @@ class EvicPressManager:
             },
             "recent_ops": ops,
             "config": {
+                "head_schema_version": 1,
                 "alpha":               self.config.alpha,
                 "tier1_capacity_gb":   self.config.tier1.capacity_bytes / 1e9,
                 "tier1_bandwidth_gbps": self.config.tier1.bandwidth_bytes_per_sec / 1e9,

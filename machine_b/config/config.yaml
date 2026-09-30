@@ -18,20 +18,20 @@ evicpress:
 # from local RAM without a network round-trip. Machine B tracks this tier
 # locally — it never queries Machine A for stats.
 tier1:
-  capacity_bytes: 104857600 #8 GB estimate for Machine A KV RAM budget
+  capacity_bytes: 104857600 # 100 MiB accounting budget for Machine A mirrors
   bandwidth_bytes_per_sec: 53687091200  # 50 GB/s (Machine A RAM bandwidth)
 
 # ---- Tier 2: Machine B RAM ----
 tier2:
   # How much RAM to dedicate to the KV cache.
-  capacity_bytes: 104857600  #4 GB  (change to 8589934592 for 8 GB)
+  capacity_bytes: 104857600  # 100 MiB (8589934592 would be 8 GiB)
 
   # RAM read bandwidth (used to estimate TTFT from this tier).
   bandwidth_bytes_per_sec: 53687091200  # 50 GB/s
 
 # ---- Tier 3: Machine B Disk (NVMe SSD) ----
 tier3:
-  capacity_bytes: 104857600  #100 GB
+  capacity_bytes: 104857600  # 100 MiB; raise explicitly for benchmark runs
 
   # NVMe sequential read bandwidth.
   bandwidth_bytes_per_sec: 3758096384  # 3.5 GB/s
@@ -60,8 +60,7 @@ dashboard:
 
 # ---- Quantization ----
 # Controls which quantization levels Machine B may apply when storing a block.
-# M4 enables real torch-based quantization; until then all blocks stay at fp16
-# regardless of what placement bands request.
+# Real torch-based INT8/INT4 codecs are enabled; disable for exact FP16 backing.
 quantization:
   enabled: true
   # Approximate size multipliers — used for capacity planning / dashboard stats.

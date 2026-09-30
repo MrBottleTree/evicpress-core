@@ -20,6 +20,11 @@ class Block:
     access_count: int   = 0
     last_access: float  = field(default_factory=_time)
     created_at: float   = field(default_factory=_time)
+    # Empty for legacy chunks; portable per-head coordinates otherwise.
+    parent_id: str = ""
+    layer: int = -1
+    kv_head: int = -1
+    token_count: int = 0
 
     @property
     def size_bytes(self) -> int:
@@ -59,4 +64,8 @@ class Block:
             "access_count": self.access_count,
             "last_access":  self.last_access,
             "created_at":   self.created_at,
+            "parent_id":    self.parent_id,
+            "layer":        self.layer,
+            "kv_head":      self.kv_head,
+            "token_count":  self.token_count,
         }

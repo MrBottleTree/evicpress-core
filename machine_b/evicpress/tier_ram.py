@@ -26,11 +26,11 @@ class RamTier:
         with self._lock:
             return block_id in self._blocks
 
-    def get(self, block_id: str) -> Optional[Block]:
+    def get(self, block_id: str, record_access: bool = True) -> Optional[Block]:
         """Return block and record access. None if not present."""
         with self._lock:
             block = self._blocks.get(block_id)
-            if block:
+            if block and record_access:
                 block.touch()
             return block
 

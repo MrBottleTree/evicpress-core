@@ -5,14 +5,8 @@ Thin adapter layer: translates gRPC request/response objects into calls on
 EvicPressManager. All heavy logic lives in the manager, not here.
 """
 
-import sys
-import os
-
-# Allow importing generated proto code regardless of CWD
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "generated"))
-
-import evicpress_pb2        # type: ignore  (generated)
-import evicpress_pb2_grpc   # type: ignore  (generated)
+import grpc
+from generated import evicpress_pb2, evicpress_pb2_grpc
 
 from grpc import aio
 from evicpress.manager import EvicPressManager
@@ -21,6 +15,46 @@ from evicpress.manager import EvicPressManager
 class EvicPressServicer(evicpress_pb2_grpc.EvicPressServiceServicer):
     def __init__(self, manager: EvicPressManager) -> None:
         self._m = manager
+
+    async def StoreHeads(self, request, context):
+        try:
+            result = self._m.head_groups.store(
+                request.descriptor_json, [(h.block_id, h.data) for h in request.heads],
+                request.client_id)
+            return evicpress_pb2.HeadGroupResponse(**result)
+        except (ValueError, RuntimeError) as exc:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+
+    async def LookupHeads(self, request, context):
+        return await self._read_heads(request, context, retrieve=False)
+
+    async def RetrieveHeads(self, request, context):
+        return await self._read_heads(request, context, retrieve=True)
+
+    async def DeleteHeads(self, request, context):
+        return evicpress_pb2.DeleteResponse(
+            success=self._m.head_groups.delete(list(request.parent_ids), request.force))
+
+    async def ReleaseHeads(self, request, context):
+        self._m.head_groups.release(list(request.lease_ids), request.client_id)
+        return evicpress_pb2.DeleteResponse(success=True)
+
+    async def SyncHeadTier1(self, request, context):
+        try:
+            revoked = self._m.head_groups.sync_tier1(
+                request.client_id, {e.block_id: e.nbytes for e in request.entries})
+            return evicpress_pb2.HeadTier1Response(revoked_ids=revoked)
+        except ValueError as exc:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+
+    async def _read_heads(self, request, context, *, retrieve: bool):
+        try:
+            items = [(p.parent_id, set(p.local_ids), p.lease_id) for p in request.parents]
+            result = self._m.head_groups.read(
+                items, request.client_id, retrieve=retrieve, pin=request.pin)
+            return evicpress_pb2.HeadBatchResponse(parents=result)
+        except (ValueError, RuntimeError) as exc:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
 
     async def Lookup(self, request, context):
         hit, tier = self._m.lookup(request.block_id)
@@ -73,6 +107,11 @@ class EvicPressServicer(evicpress_pb2_grpc.EvicPressServiceServicer):
             tier1_blocks=t1["block_count"],
             tier1_bytes=t1["used_bytes"],
             tier1_promotions=s["tier1_promotions"],
+            head_schema_version=1,
+            parent_hits=s["parent_hits"],
+            parent_misses=s["parent_misses"],
+            head_rpc_calls=s["head_rpc_calls"],
+            head_wire_bytes=s["head_wire_bytes"],
         )
 
 
