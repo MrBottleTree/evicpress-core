@@ -1,10 +1,12 @@
 SHELL     := /bin/bash
 PYTHON    ?= python
-VENV      := venv/bin/activate
+VENV_DIR  := venv
+VENV      := $(VENV_DIR)/bin/activate
 PROTO     := proto/evicpress.proto
 GEN_DIR   := generated
 LOG       := /tmp/evicpress.log
 PID_FILE  := /tmp/evicpress.pid
+CONFIG    ?= config/config.yaml
 
 .PHONY: help setup proto run start stop restart logs status stats ping clean
 
@@ -14,7 +16,8 @@ help:       ## Show this help
 # ── Setup ──────────────────────────────────────────────────────────────────────
 
 setup:      ## Install dependencies + generate proto stubs
-	python3 -m venv $(dir $(VENV))
+	python3 -m venv $(VENV_DIR)
+	source $(VENV) && pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
 	source $(VENV) && pip install -r requirements.txt
 	$(MAKE) proto
 
@@ -31,22 +34,32 @@ proto:      ## (Re)generate gRPC Python stubs from evicpress.proto
 # ── Run ────────────────────────────────────────────────────────────────────────
 
 run:        ## Start Machine B in the foreground (Ctrl-C to stop)
-	source $(VENV) && PYTHONUNBUFFERED=1 python -u main.py
+	source $(VENV) && PYTHONUNBUFFERED=1 python -u main.py --config $(CONFIG)
 
 start:      ## Start Machine B in the background; logs → $(LOG)
 	@if [ -f $(PID_FILE) ] && kill -0 $$(cat $(PID_FILE)) 2>/dev/null; then \
 		echo "[evicpress] already running (PID=$$(cat $(PID_FILE)))"; \
 	else \
-		source $(VENV) && PYTHONUNBUFFERED=1 nohup python -u main.py > $(LOG) 2>&1 & \
-		echo $$! > $(PID_FILE); \
-		sleep 2 && echo "[evicpress] started (PID=$$(cat $(PID_FILE)))"; \
+		PYTHONUNBUFFERED=1 nohup $(VENV_DIR)/bin/python -u main.py --config $(CONFIG) > $(LOG) 2>&1 & \
+		pid=$$!; echo $$pid > $(PID_FILE); \
+		sleep 2; \
+		if kill -0 $$pid 2>/dev/null; then \
+			echo "[evicpress] started (PID=$$pid, CONFIG=$(CONFIG))"; \
+		else \
+			echo "[evicpress] failed to start; see $(LOG)"; rm -f $(PID_FILE); exit 1; \
+		fi; \
 	fi
 
 stop:       ## Stop the background EvicPress process
 	@if [ -f $(PID_FILE) ] && kill -0 $$(cat $(PID_FILE)) 2>/dev/null; then \
-		kill $$(cat $(PID_FILE)) && rm -f $(PID_FILE) && echo "[evicpress] stopped"; \
+		pid=$$(cat $(PID_FILE)); \
+		if tr '\0' ' ' < /proc/$$pid/cmdline | grep -q 'main.py'; then \
+			kill $$pid && rm -f $(PID_FILE) && echo "[evicpress] stopped"; \
+		else \
+			echo "[evicpress] PID file points to an unrelated process; refusing to kill"; exit 1; \
+		fi; \
 	else \
-		pkill -f "python.*main.py" 2>/dev/null && echo "[evicpress] stopped (fallback)" || echo "[evicpress] not running"; \
+		echo "[evicpress] not running"; \
 		rm -f $(PID_FILE); \
 	fi
 

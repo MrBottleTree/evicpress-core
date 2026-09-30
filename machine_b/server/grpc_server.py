@@ -35,7 +35,7 @@ class EvicPressServicer(evicpress_pb2_grpc.EvicPressServiceServicer):
         return evicpress_pb2.StoreResponse(
             success=success,
             tier=tier,
-            message=f"stored in tier{tier}",
+            message=f"stored in tier{tier}" if success else "store rejected by tier3",
         )
 
     async def Retrieve(self, request, context):

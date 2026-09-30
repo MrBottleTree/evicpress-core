@@ -358,7 +358,10 @@ class EvicPressManager:
                 access_count=access_count,
                 created_at=created_at,
             )
-            self.tier3.put(t3_block)
+            if not self.tier3.put(t3_block):
+                self._log("STORE", block_id,
+                          f"tier3 rejected block size={_fmt(size)} (capacity exceeded)")
+                return False, 0, quant_level
             self._log("STORE", block_id,
                       f"tier3 size={_fmt(size)} util={utility:.4f} quant={quant_level}")
 
