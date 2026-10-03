@@ -92,6 +92,8 @@ class LocalEvicPressClient:
             data_dir must be absolute. Server/dashboard fields are not started.
         cache_identity: Optional model/revision/layout fingerprint persisted in
             the cache directory to reject incompatible reuse.
+        benchmark_enabled: Opt in to between-request evaluation controls. These
+            reject concurrent direct work and preserve directory ownership.
 
     Raises:
         ValueError: Invalid capacities, directory, or incompatible identity.
@@ -107,6 +109,7 @@ class LocalEvicPressClient:
         config: EvicPressConfig | str | os.PathLike[str],
         *,
         cache_identity: Mapping[str, Any] | None = None,
+        benchmark_enabled: bool = False,
     ) -> None:
         cfg = deepcopy(
             config if isinstance(config, EvicPressConfig) else load_config(str(config))
@@ -123,6 +126,7 @@ class LocalEvicPressClient:
             raise ValueError("prefetch_max_queue must be positive")
         cfg.tier3.data_dir = str(directory.resolve())
         self._pid = os.getpid()
+        self.benchmark_enabled = benchmark_enabled
         self._lifecycle_lock = threading.RLock()
         self._closed = False
         self._closing = False
@@ -256,6 +260,47 @@ class LocalEvicPressClient:
 
             self._loop.call_soon_threadsafe(enqueue)
         return result
+
+    def benchmark_snapshot(self) -> dict:
+        """Research-only canonical storage accounting, without mirror double count."""
+        self._check_benchmark()
+        return self._benchmark_call(self.manager.backing_snapshot)
+
+    def benchmark_release_tier1(self) -> int:
+        """Release ledger only after the worker has excluded active references."""
+        self._check_benchmark()
+        return self._benchmark_call(self.manager.release_tier1)
+
+    def benchmark_reset(self, timeout: float = 30) -> None:
+        """Drain prior hints and clear exclusively owned chunk storage/history."""
+        self._check_benchmark()
+        if not self._lifecycle_lock.acquire(blocking=False):
+            raise RuntimeError("local manager has active work")
+        try:
+            self.drain_prefetch(timeout)
+            self._call(self.manager.reset_chunk_storage)
+        finally:
+            self._lifecycle_lock.release()
+
+    def _check_benchmark(self) -> None:
+        self._check_open()
+        if not self.benchmark_enabled:
+            raise RuntimeError("benchmark lifecycle controls are disabled")
+
+    def _benchmark_call(self, method: Callable[..., T]) -> T:
+        """Refuse overlapping direct operations rather than waiting then mutating."""
+        if not self._lifecycle_lock.acquire(blocking=False):
+            raise RuntimeError("local manager has active work")
+        try:
+            self._check_open()
+            if not self.manager.operation_lock.acquire(blocking=False):
+                raise RuntimeError("local manager has active work")
+            try:
+                return method()
+            finally:
+                self.manager.operation_lock.release()
+        finally:
+            self._lifecycle_lock.release()
 
     def drain_prefetch(self, timeout: float = 30) -> None:
         """Wait for prior hints, outside measured demand paths; raise on failure."""

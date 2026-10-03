@@ -187,6 +187,7 @@ class _Stats:
         self.evictions:       int = 0
         self.tier1_promotions: int = 0  # times Machine B signalled tier=1 to Machine A
         self.total_ops:       int = 0
+        self.quantization_fallbacks: int = 0
         self._lock = threading.Lock()
 
     def hit(self, tier: int) -> None:
@@ -383,6 +384,7 @@ class EvicPressManager:
                 try:
                     payload = _quantize_bytes(data, quant_level)
                 except Exception as e:
+                    self.stats.quantization_fallbacks += 1
                     self._log("STORE", block_id,
                               f"quant {quant_level} failed ({type(e).__name__}); fp16 fallback")
                     quant_level = "fp16"
@@ -516,6 +518,56 @@ class EvicPressManager:
             except asyncio.QueueFull:
                 break
         return queued
+
+    def release_tier1(self) -> int:
+        """Release ledger entries only; canonical disk and RAM bytes survive.
+
+        The caller must first release physical mirrors and exclude readers.
+        This is a local lifecycle operation, not a new remote RPC.
+        """
+        with self.operation_lock:
+            if self.head_groups.leases or self.head_groups.owners:
+                raise RuntimeError("benchmark lifecycle supports unleased chunks only")
+            return sum(self.tier1.remove(e["block_id"])
+                       for e in self.tier1.all_entries())
+
+    def reset_chunk_storage(self) -> None:
+        """Clear this owned manager's indexed chunks and sample policy history.
+
+        Prefetch must be drained by the owning client before calling. Never
+        recursively deletes a directory or adopts another client's storage.
+        """
+        with self.operation_lock:
+            if self.head_groups.leases or self.head_groups.owners:
+                raise RuntimeError("benchmark reset refuses head storage or leases")
+            ids = {m["block_id"] for m in self.tier3.all_metas()}
+            ids.update(b.block_id for b in self.tier2.all_blocks())
+            ids.update(e["block_id"] for e in self.tier1.all_entries())
+            for bid in ids:
+                if not self.delete(bid):
+                    raise RuntimeError(f"unable to delete owned chunk: {bid}")
+            self.stats = _Stats()
+            self._recent_ops.clear()
+
+    def backing_snapshot(self) -> dict:
+        """Count canonical precision once, separately from inclusive mirrors."""
+        with self.operation_lock:
+            metas = self.tier3.all_metas()
+            distribution: dict[str, dict[str, int]] = {}
+            for meta in metas:
+                bucket = distribution.setdefault(meta.get("quant_level", "fp16"),
+                                                  {"blocks": 0, "bytes": 0})
+                bucket["blocks"] += 1
+                bucket["bytes"] += meta["size_bytes"]
+            return {
+                "canonical_blocks": len(metas),
+                "canonical_bytes": self.tier3.used_bytes,
+                "ram_backing_bytes": self.tier2.used_bytes,
+                "tier1_ledger_bytes": self.tier1.used_bytes,
+                "precision_distribution": distribution,
+                "quantization_fallbacks": self.stats.quantization_fallbacks,
+                "disk_files": self.tier3.storage_bytes(),
+            }
 
     async def prefetch_worker(self) -> None:
         """

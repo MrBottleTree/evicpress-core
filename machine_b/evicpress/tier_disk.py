@@ -92,6 +92,27 @@ class DiskTier:
         with self._lock:
             return block_id in self._index
 
+    def storage_bytes(self) -> dict[str, int | str]:
+        """Physical blob/metadata file sizes, distinct from capacity accounting."""
+        with self._lock:
+            payload, metadata, allocated = 0, 0, 0
+            for folder, kind in ((self._blob_dir, "payload"), (self._meta_dir, "metadata")):
+                with os.scandir(folder) as entries:
+                    for entry in entries:
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        stat = entry.stat(follow_symlinks=False)
+                        if kind == "payload":
+                            payload += stat.st_size
+                        else:
+                            metadata += stat.st_size
+                        allocated += (stat.st_blocks * 512 if hasattr(stat, "st_blocks")
+                                      else stat.st_size)
+            return {"payload_file_bytes": payload, "metadata_file_bytes": metadata,
+                    "allocated_file_bytes": allocated,
+                    "allocation_measurement": "st_blocks" if os.name != "nt" else "file_size",
+                    "scope": "owned data/meta files; directory and lock/identity overhead excluded"}
+
     def get(self, block_id: str, record_access: bool = True) -> Optional[Block]:
         """Read block from disk. Updates access metadata. None if absent."""
         with self._lock:

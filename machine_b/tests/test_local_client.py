@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -53,6 +54,73 @@ def tensor_payload():
 
 
 class LocalClientTest(unittest.TestCase):
+    def test_benchmark_controls_reject_concurrent_direct_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with LocalEvicPressClient(config(directory), benchmark_enabled=True) as client:
+                entered, release = threading.Event(), threading.Event()
+                original = client.manager.store
+
+                def held_store(*args):
+                    entered.set()
+                    if not release.wait(5):
+                        raise RuntimeError("test work did not release")
+                    return original(*args)
+
+                with mock.patch.object(client.manager, "store", side_effect=held_store):
+                    with ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(client.store, "block", b"bytes")
+                        self.assertTrue(entered.wait(5))
+                        try:
+                            for operation in (client.benchmark_reset, client.benchmark_release_tier1,
+                                              client.benchmark_snapshot):
+                                with self.assertRaises(RuntimeError):
+                                    operation()
+                        finally:
+                            release.set()
+                        self.assertTrue(future.result(5).success)
+
+    def test_benchmark_controls_opt_in_preserve_backing_and_reset_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = config(directory, prefetch=True, ram=1024 * 1024)
+            with LocalEvicPressClient(cfg) as client:
+                with self.assertRaises(RuntimeError):
+                    client.benchmark_reset()
+            with LocalEvicPressClient(cfg, benchmark_enabled=True) as client:
+                _, payload = tensor_payload()
+                client.store("block", payload)
+                client.manager.tier1.admit("block", len(payload), 1, "fp16")
+                client.prefetch(["block"]).result(10)
+                client.drain_prefetch()
+                before = client.benchmark_snapshot()
+                self.assertEqual(before["canonical_blocks"], 1)
+                self.assertEqual(before["disk_files"]["payload_file_bytes"], len(payload))
+                self.assertGreater(before["disk_files"]["metadata_file_bytes"], 0)
+                self.assertEqual(before["precision_distribution"]["fp16"]["blocks"], 1)
+                client.benchmark_release_tier1()
+                self.assertEqual(client.benchmark_snapshot()["tier1_ledger_bytes"], 0)
+                self.assertEqual(client.retrieve("block").data, payload)
+                self.assertGreater(client.get_state()["stats"]["total_hits"], 0)
+                client.benchmark_reset()
+                self.assertEqual(client.benchmark_snapshot()["canonical_blocks"], 0)
+                self.assertEqual(client.get_state()["stats"]["total_hits"], 0)
+                self.assertFalse(client.lookup("block").hit)
+
+    def test_benchmark_rejects_lease_and_records_quantization_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with LocalEvicPressClient(config(directory, level="int4"),
+                                      benchmark_enabled=True) as client:
+                client.store("raw", b"not a tensor")
+                state = client.benchmark_snapshot()
+                self.assertEqual(state["quantization_fallbacks"], 1)
+                self.assertEqual(list(state["precision_distribution"]), ["fp16"])
+                client.manager.head_groups.leases["active"] = {}
+                with self.assertRaises(RuntimeError):
+                    client.benchmark_reset()
+                with self.assertRaises(RuntimeError):
+                    client.benchmark_release_tier1()
+                self.assertTrue(client.lookup("raw").hit)
+                client.manager.head_groups.leases.clear()
+
     def test_installable_library_does_not_import_rpc_or_server(self):
         code = (
             "import sys; from evicpress.local import LocalEvicPressClient; "
