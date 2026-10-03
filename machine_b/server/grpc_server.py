@@ -17,6 +17,7 @@ class EvicPressServicer(evicpress_pb2_grpc.EvicPressServiceServicer):
         self._m = manager
 
     async def StoreHeads(self, request, context):
+        self._m.head_groups.record_rpc(sum(len(h.data) for h in request.heads))
         try:
             result = self._m.head_groups.store(
                 request.descriptor_json, [(h.block_id, h.data) for h in request.heads],
@@ -48,10 +49,13 @@ class EvicPressServicer(evicpress_pb2_grpc.EvicPressServiceServicer):
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
 
     async def _read_heads(self, request, context, *, retrieve: bool):
+        self._m.head_groups.record_rpc()
         try:
             items = [(p.parent_id, set(p.local_ids), p.lease_id) for p in request.parents]
             result = self._m.head_groups.read(
                 items, request.client_id, retrieve=retrieve, pin=request.pin)
+            self._m.head_groups.record_rpc(
+                sum(len(h.get("data", b"")) for p in result for h in p.get("heads", [])), calls=0)
             return evicpress_pb2.HeadBatchResponse(parents=result)
         except (ValueError, RuntimeError) as exc:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))

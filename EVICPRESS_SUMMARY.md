@@ -1,5 +1,19 @@
 # EvicPress: Technical Reference Summary
 
+Sections 1–8 summarize the paper, not a claim that this prototype implements every paper feature. The current manager uses a compressibility proxy, access frequency and bandwidth estimates with FP16/INT8/INT4 backing; it does not implement the paper's complete profiling or sparse-attention methods.
+
+## Direct-local library (implemented 2026-10-03)
+
+This repository now installs as `evicpress-core`, exposing `evicpress.local.LocalEvicPressClient`. Install it into Machine A's existing CUDA environment with `python -m pip install --no-deps -e /absolute/path/to/evicpress-core`; its core dependencies are PyTorch and PyYAML. The existing `machine_b/requirements.txt` remains the separate service environment, not a requirement for local mode.
+
+The local client wraps the same `EvicPressManager` and codecs. Chunk operations return typed presence/admission/restoration results, including source tier and backing precision. Head operations preserve native dictionaries, complete-group publication, inventory reconciliation and read leases. Tensor serialization remains; restored low-bit backing is lossy.
+
+Use an absolute, dedicated disk `data_dir` and construct one client after GPU-worker startup. OS writer locking rejects another owner, model/layout identity rejects incompatible cache reuse, and calls inherited across a process fork are rejected. Prefetch hints return futures and enter their bounded queue on the queue's owning thread. `drain_prefetch()` and `close()` provide explicit synchronization and shutdown; backing files are retained. Background failures are reported rather than hidden.
+
+No gRPC server, channel or dashboard is started by the library. `head_calls`/`head_payload_bytes` track manager activity; `head_rpc_calls`/`head_wire_bytes` are recorded at the real service boundary and stay zero for direct use. Native GPU attention and its cache footprint are unchanged. This is not QEvict-style active-cache eviction.
+
+CPU validation: eight local-library tests plus the three existing service/head tests pass, including a real loopback head client. GPU/vLLM execution and the target-node dependency versions remain unverified. On the paired branch, the companion Machine A repository provides direct-local LMCache configuration and adapter tests; the benchmark suite is still the existing pilot.
+
 ## 1. Core Philosophy: Joint Optimization
 Unlike traditional systems that perform eviction (LRU) and compression (fixed ratio) independently, EvicPress treats them as a **joint optimization problem**. It acknowledges that some contexts are highly sensitive to compression (needing fast storage/eviction), while others can be aggressively compressed without quality loss (staying in fast storage).
 

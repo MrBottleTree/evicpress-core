@@ -53,9 +53,9 @@ def validate_descriptor(raw: str) -> dict:
         raise ValueError("head mode currently requires FP16 KV_2LTD")
     if d.get("positions") != {"start": 0, "count": tokens}:
         raise ValueError("all original positions must be retained in head mode")
-    expected = [{"block_id": segment_id(d["parent_id"], l, h, tokens),
-                 "layer": l, "kv_head": h}
-                for l in range(layers) for h in range(heads)]
+    expected = [{"block_id": segment_id(d["parent_id"], layer, h, tokens),
+                 "layer": layer, "kv_head": h}
+                for layer in range(layers) for h in range(heads)]
     if d.get("heads") != expected:
         raise ValueError("missing, duplicated or inconsistent head coordinates")
     return d
@@ -82,6 +82,7 @@ class HeadGroupStore:
         self.leases: dict[str, tuple[str, set[str], float]] = {}
         self.owners: dict[str, str] = {}
         self.counters = {"parent_hits": 0, "parent_misses": 0,
+                         "head_calls": 0, "head_payload_bytes": 0,
                          "head_rpc_calls": 0, "head_wire_bytes": 0}
         for path in self.directory.glob("*.json"):
             try:
@@ -125,8 +126,8 @@ class HeadGroupStore:
             raise ValueError("head group exceeds configured message limit")
         prepared = []
         with self.manager.operation_lock:
-            self.counters["head_rpc_calls"] += 1
-            self.counters["head_wire_bytes"] += sum(len(v) for v in data.values())
+            self.counters["head_calls"] += 1
+            self.counters["head_payload_bytes"] += sum(len(v) for v in data.values())
             previous = self.groups.get(d["parent_id"])
             if previous is not None and previous != d:
                 raise ValueError("parent descriptor cannot be changed in place")
@@ -228,7 +229,7 @@ class HeadGroupStore:
         if not client or len(items) > 64:
             raise ValueError("client_id required; maximum 64 parents per batch")
         with self.manager.operation_lock:
-            self.counters["head_rpc_calls"] += 1
+            self.counters["head_calls"] += 1
             if retrieve:
                 estimated = sum(
                     4 * d["shape"][2] * d["head_dim"] * max(0, len(d["heads"]) - len(local))
@@ -263,7 +264,7 @@ class HeadGroupStore:
                                 h["tier"] = tier
                                 h["quant_level"] = block.quant_level
                                 self.manager.stats.hit(tier)
-                                self.counters["head_wire_bytes"] += len(h["data"])
+                                self.counters["head_payload_bytes"] += len(h["data"])
                                 if tier == 3 and self.manager.tier2.has_space(block.size_bytes):
                                     self.manager.tier2.put(replace(block, tier=2))
                         except (OSError, ValueError, RuntimeError, EOFError, pickle.UnpicklingError, TypeError, IndexError):
@@ -338,6 +339,12 @@ class HeadGroupStore:
             self._path(parent).unlink(missing_ok=True)
             for h in d["heads"]:
                 self.owners.pop(h["block_id"], None)
+
+    def record_rpc(self, payload_bytes: int = 0, *, calls: int = 1) -> None:
+        """Record actual service-boundary traffic, separate from direct calls."""
+        with self.manager.operation_lock:
+            self.counters["head_rpc_calls"] += calls
+            self.counters["head_wire_bytes"] += payload_bytes
 
     def _path(self, parent: str) -> Path:
         return self.directory / (hashlib.sha256(parent.encode()).hexdigest() + ".json")
